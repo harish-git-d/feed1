@@ -1,0 +1,99 @@
+<!--
+  ============================================================================
+  GAI Feed Jobs — paste into CRCRBatch-context-temp.xml before </beans>
+  ============================================================================
+  Direct integration — no separate jar, no ProcessBuilder.
+  Each job is a DefaultStep wrapping a Callable<Integer> in the SCEF package.
+  Identical pattern to AgedReportJob, SendCefScefDataToMLIVJobLet, etc.
+  ============================================================================
+-->
+
+<!-- ── Job definitions (6 feeds) ────────────────────────────────────────── -->
+
+<batch:job id="GAIFeedStressExposureJob">
+    <batch:listeners>
+        <batch:listener ref="batchStepListener"/>
+    </batch:listeners>
+    <batch:step id="GAIFeedStressExposureStep">
+        <batch:tasklet ref="gaiFeedStressExposureTask" allow-start-if-complete="true"/>
+    </batch:step>
+</batch:job>
+
+<batch:job id="GAIFeedSwwrFlagJob">
+    <batch:listeners>
+        <batch:listener ref="batchStepListener"/>
+    </batch:listeners>
+    <batch:step id="GAIFeedSwwrFlagStep">
+        <batch:tasklet ref="gaiFeedSwwrFlagTask" allow-start-if-complete="true"/>
+    </batch:step>
+</batch:job>
+
+<batch:job id="GAIFeedPseExposureJob">
+    <batch:listeners>
+        <batch:listener ref="batchStepListener"/>
+    </batch:listeners>
+    <batch:step id="GAIFeedPseExposureStep">
+        <batch:tasklet ref="gaiFeedPseExposureTask" allow-start-if-complete="true"/>
+    </batch:step>
+</batch:job>
+
+<batch:job id="GAIFeedSwwrRecoveryJob">
+    <batch:listeners>
+        <batch:listener ref="batchStepListener"/>
+    </batch:listeners>
+    <batch:step id="GAIFeedSwwrRecoveryStep">
+        <batch:tasklet ref="gaiFeedSwwrRecoveryTask" allow-start-if-complete="true"/>
+    </batch:step>
+</batch:job>
+
+<batch:job id="GAIFeedOetFlagJob">
+    <batch:listeners>
+        <batch:listener ref="batchStepListener"/>
+    </batch:listeners>
+    <batch:step id="GAIFeedOetFlagStep">
+        <batch:tasklet ref="gaiFeedOetFlagTask" allow-start-if-complete="true"/>
+    </batch:step>
+</batch:job>
+
+<!-- Monthly — last business day of month -->
+<batch:job id="GAIFeedPseMonthEndJob">
+    <batch:listeners>
+        <batch:listener ref="batchStepListener"/>
+    </batch:listeners>
+    <batch:step id="GAIFeedPseMonthEndStep">
+        <batch:tasklet ref="gaiFeedPseMonthEndTask" allow-start-if-complete="true"/>
+    </batch:step>
+</batch:job>
+
+
+<!-- ── Bean definitions ─────────────────────────────────────────────────── -->
+<!--
+  Same pattern as existing beans:
+    <bean id="agedReportJobTask"
+          class="com.citi.risk.core.spring.batch.impl.DefaultStep"
+          c:clazz="com.citi.risk.scef.limitexposure.config.job.AgedReportJob"/>
+-->
+
+<bean id="gaiFeedStressExposureTask"
+      class="com.citi.risk.core.spring.batch.impl.DefaultStep"
+      c:clazz="com.citi.risk.scef.limitexposure.gai.job.GAIStressExposureJob"/>
+
+<bean id="gaiFeedSwwrFlagTask"
+      class="com.citi.risk.core.spring.batch.impl.DefaultStep"
+      c:clazz="com.citi.risk.scef.limitexposure.gai.job.GAISwwrFlagJob"/>
+
+<bean id="gaiFeedPseExposureTask"
+      class="com.citi.risk.core.spring.batch.impl.DefaultStep"
+      c:clazz="com.citi.risk.scef.limitexposure.gai.job.GAIPseExposureJob"/>
+
+<bean id="gaiFeedSwwrRecoveryTask"
+      class="com.citi.risk.core.spring.batch.impl.DefaultStep"
+      c:clazz="com.citi.risk.scef.limitexposure.gai.job.GAISwwrRecoveryJob"/>
+
+<bean id="gaiFeedOetFlagTask"
+      class="com.citi.risk.core.spring.batch.impl.DefaultStep"
+      c:clazz="com.citi.risk.scef.limitexposure.gai.job.GAIOetFlagJob"/>
+
+<bean id="gaiFeedPseMonthEndTask"
+      class="com.citi.risk.core.spring.batch.impl.DefaultStep"
+      c:clazz="com.citi.risk.scef.limitexposure.gai.job.GAIPseMonthEndJob"/>
