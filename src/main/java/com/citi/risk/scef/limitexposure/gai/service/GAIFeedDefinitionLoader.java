@@ -12,47 +12,69 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Loads feed definition YAML files from:
+ * Loads and validates feed definition YAML files from:
  *   classpath:gai/feed-definitions/{feedName}.yml
  *
- * Files live in:
+ * Place YAML files in:
  *   scef-war/src/main/resources/gai/feed-definitions/
  *
- * Results are cached in memory after first load.
- * SnakeYAML is already a transitive dependency via Spring in scef-war.
+ * Results are cached after first load.
+ * SnakeYAML is a transitive Spring dependency — already available in scef-war.
  */
 public class GAIFeedDefinitionLoader {
 
-    private static final Logger logger =
-            LoggerFactory.getLogger(GAIFeedDefinitionLoader.class);
+    private static final Logger logger = LoggerFactory.getLogger(GAIFeedDefinitionLoader.class);
 
-    private final Map<String, FeedDefinition> cache = new ConcurrentHashMap<>();
+    // Java 8 compatible explicit type parameter
+    private final Map<String, FeedDefinition> cache = new ConcurrentHashMap<String, FeedDefinition>();
 
     @Inject
-    public GAIFeedDefinitionLoader() {}
+    public GAIFeedDefinitionLoader() { }
 
     public FeedDefinition load(String feedName) {
-        return cache.computeIfAbsent(feedName, this::loadFromClasspath);
+        FeedDefinition cached = cache.get(feedName);
+        if (cached != null) return cached;
+        FeedDefinition loaded = loadFromClasspath(feedName);
+        cache.put(feedName, loaded);
+        return loaded;
     }
 
     private FeedDefinition loadFromClasspath(String feedName) {
         String path = "gai/feed-definitions/" + feedName + ".yml";
-        logger.debug("[GAI] Loading feed definition: {}", path);
-
-        try (InputStream is = getClass().getClassLoader()
-                                        .getResourceAsStream(path)) {
+        try (InputStream is = getClass().getClassLoader().getResourceAsStream(path)) {
             if (is == null) {
-                throw new IllegalStateException(
-                    "Feed definition not found: " + path);
+                throw new IllegalStateException("Feed definition not found on classpath: " + path);
             }
             Yaml yaml = new Yaml(new Constructor(FeedDefinition.class));
             FeedDefinition def = yaml.load(is);
-            logger.info("[GAI] Loaded definition for [{}] — perspective={}",
-                        feedName, def.getPerspectiveName());
+            if (def == null) {
+                throw new IllegalStateException("Feed definition is empty: " + path);
+            }
+            validate(def, feedName);
+            logger.info("[GAI] Loaded feed definition feedName={} feedId={} frequency={}",
+                        def.getFeedName(), def.getGaiFeedId(), def.getFrequency());
             return def;
         } catch (Exception e) {
-            throw new RuntimeException(
-                "Failed to load feed definition: " + path, e);
+            throw new RuntimeException("Failed to load feed definition: " + path, e);
+        }
+    }
+
+    private void validate(FeedDefinition def, String requestedFeedName) {
+        if (def.getFeedName() == null || def.getFeedName().trim().length() == 0) {
+            throw new IllegalStateException("feedName is mandatory in YAML: " + requestedFeedName);
+        }
+        if (!requestedFeedName.equals(def.getFeedName())) {
+            throw new IllegalStateException("YAML feedName mismatch. requested=" +
+                    requestedFeedName + " yaml=" + def.getFeedName());
+        }
+        if (def.getColumnsForType("EVENT").isEmpty()) {
+            throw new IllegalStateException("eventFields missing in YAML: " + requestedFeedName);
+        }
+        if (def.getColumnsForType("RECORD").isEmpty()) {
+            throw new IllegalStateException("recordFields missing in YAML: " + requestedFeedName);
+        }
+        if (def.getColumnsForType("ATTRIBUTE").isEmpty()) {
+            throw new IllegalStateException("attributeFields missing in YAML: " + requestedFeedName);
         }
     }
 }

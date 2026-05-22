@@ -1,15 +1,14 @@
 package com.citi.risk.scef.limitexposure.gai.domain;
 
-/** Metadata about one generated GAI file (used to build the .ctrl file). */
+/** Metadata about one generated GAI file — used to build the .ctrl trigger file. */
 public class FileMetadata {
 
     private final String fileName;
     private final String filePath;
-    private final int    recordCount;
-    private final String fileType;    // EVENT, RECORD, ATTRIBUTE
+    private final int recordCount;
+    private final String fileType;
 
-    public FileMetadata(String fileName, String filePath,
-                        int recordCount, String fileType) {
+    public FileMetadata(String fileName, String filePath, int recordCount, String fileType) {
         this.fileName    = fileName;
         this.filePath    = filePath;
         this.recordCount = recordCount;
