@@ -163,7 +163,17 @@ public class GAIEmailAlertService {
     }
 
     private String prefix() {
-        return cfg.getString("SCEF.gai.feed.alert.subject.prefix", "[SCEF-GAI]");
+        String base = cfg.getString("SCEF.gai.feed.alert.subject.prefix", "[SCEF-GAI]");
+        try {
+            // Uses CoreModule.getEnvironment() — same as elsewhere in SCEF
+            // Produces subject like: [SCEF-GAI][UAT] FAILED — stress-exposure cobDate=20260522
+            String env = com.citi.risk.scef.limitexposure.config.module.CoreModule
+                    .getEnvironment().getLifeCycle().name();
+            return base + "[" + env + "]";
+        } catch (Exception e) {
+            logger.debug("[GAI][EMAIL] Could not resolve environment for subject: {}", e.getMessage());
+            return base;
+        }
     }
 
     private String rowStatus(int count) {
