@@ -1,6 +1,9 @@
 package com.citi.risk.scef.limitexposure.gai.service;
 
+import com.citi.risk.scef.limitexposure.domain.EmailDetails;
+import com.citi.risk.scef.limitexposure.domain.SCEFUserDto;
 import com.citi.risk.scef.limitexposure.service.CommonEmailSendService;
+import com.citi.risk.scef.limitexposure.service.EmailServiceProperties;
 import org.apache.commons.configuration.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -9,25 +12,20 @@ import javax.inject.Inject;
 import javax.inject.Named;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Sends HTML email alerts for GAI feed issues.
  *
- * Uses SCEF's existing CommonEmailSendService — confirmed from SCEFModule.java line 125:
- *   bind(CommonEmailSendService.class)
- *       .annotatedWith(Names.named("emailSendServiceImpl"))
- *       .to(EmailSendServiceImpl.class);
+ * Uses SCEF's existing EmailDetails + SCEFUserDto pattern — confirmed from
+ * EmailSendServiceImpl.sendHeartBeatNotificationEmail() which shows the
+ * exact construction pattern (images 3-4).
  *
  * Three alert types:
  *   sendZeroRowsAlert()    — all 3 queries returned 0 rows
- *   sendRowMismatchAlert() — event/record/attribute counts differ (one is 0)
+ *   sendRowMismatchAlert() — one file type has 0 rows while others do not
  *   sendFailureAlert()     — unhandled exception during job execution
- *
- * Properties required in core.properties:
- *   SCEF.gai.feed.alert.enabled=true
- *   SCEF.gai.feed.alert.recipients=team@citi.com
- *   SCEF.gai.feed.alert.from=scef-noreply@citi.com
- *   SCEF.gai.feed.alert.subject.prefix=[SCEF-GAI]
  */
 public class GAIEmailAlertService {
 
@@ -35,13 +33,16 @@ public class GAIEmailAlertService {
     private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final CommonEmailSendService emailSendService;
+    private final EmailServiceProperties emailServiceProperties;
     private final Configuration cfg;
 
     @Inject
     public GAIEmailAlertService(
             @Named("emailSendServiceImpl") CommonEmailSendService emailSendService,
+            EmailServiceProperties emailServiceProperties,
             Configuration cfg) {
-        this.emailSendService = emailSendService;
+        this.emailSendService      = emailSendService;
+        this.emailServiceProperties = emailServiceProperties;
         this.cfg = cfg;
     }
 
@@ -98,24 +99,37 @@ public class GAIEmailAlertService {
 
     private void send(String subject, String htmlBody, String feedName) {
         try {
-            String recipients = cfg.getString("SCEF.gai.feed.alert.recipients", "");
-            String from       = cfg.getString("SCEF.gai.feed.alert.from", "scef-noreply@citi.com");
-
-            if (recipients == null || recipients.trim().length() == 0) {
+            String recipientsCsv = cfg.getString("SCEF.gai.feed.alert.recipients", "");
+            if (recipientsCsv == null || recipientsCsv.trim().length() == 0) {
                 logger.warn("[GAI][EMAIL] SCEF.gai.feed.alert.recipients not set — alert suppressed: {}",
                             subject);
                 return;
             }
 
-            // Uses the same EmailDto pattern as the rest of SCEF
-            com.citi.risk.scef.limitexposure.domain.EmailDto email =
-                    new com.citi.risk.scef.limitexposure.domain.EmailDto();
-            email.setTo(recipients);
-            email.setFrom(from);
-            email.setSubject(subject);
-            email.setBody(htmlBody);
+            // Build EmailDetails using the same pattern as
+            // EmailSendServiceImpl.sendHeartBeatNotificationEmail() (image 3-4)
+            EmailDetails emailDetails = new EmailDetails();
 
-            emailSendService.sendEmail(email);
+            // From address — reuse SCEF's existing email from property
+            emailDetails.setFrom(emailServiceProperties.getEmailFrom());
+
+            // Recipients — Set<SCEFUserDto> matching SCEF's pattern
+            Set<SCEFUserDto> toSet = new HashSet<SCEFUserDto>();
+            for (String email : recipientsCsv.split(";")) {
+                String trimmed = email.trim();
+                if (trimmed.length() > 0) {
+                    SCEFUserDto dto = new SCEFUserDto();
+                    dto.setEmail(trimmed);
+                    toSet.add(dto);
+                }
+            }
+            emailDetails.setTo(toSet);
+
+            // Subject and body
+            emailDetails.setEmailSubject(subject);
+            emailDetails.setEmailBody(htmlBody);
+
+            emailSendService.sendEmail(emailDetails);
             logger.info("[GAI][EMAIL] Alert sent: {}", subject);
 
         } catch (Exception ex) {

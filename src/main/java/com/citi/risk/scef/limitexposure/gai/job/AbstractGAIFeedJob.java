@@ -27,24 +27,11 @@ import java.util.concurrent.Callable;
 /**
  * Base class for all 6 GAI feed jobs.
  *
+ * Follows the exact same pattern as AgedReportJob:
+ *   extends JobInterfaceDefaultImpl
+ *   implements Callable<Integer>, ManagedExecution, BatchParameterAware
+ *
  * Default cobDate: yesterday (T-1). Override via Batchly parameter cobDate=yyyyMMdd.
- *
- * Job flow:
- *   1. Load feed definition YAML
- *   2. Query ADMCEF.SCEF_REQUEST — EVENT / RECORD / ATTRIBUTE
- *   3. Write pipe-delimited .dat.gz files
- *   4. Write .ctrl control file
- *   5. SFTP to GAI gateway (if enabled)
- *
- * Exception handling:
- *   - All exceptions caught in execute(), logged with full stack trace
- *   - Failure email alert sent (independently guarded)
- *   - Re-thrown as RuntimeException so Spring Batch marks step FAILED
- *
- * Email alerts sent for:
- *   - Zero rows across all three file types
- *   - Row count mismatch (one file type is 0)
- *   - Any unhandled exception
  */
 public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
         implements Callable<Integer>, ManagedExecution, BatchParameterAware {
@@ -56,15 +43,21 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
 
     protected abstract String getFeedName();
 
-    @Override
+    // ── BatchParameterAware ───────────────────────────────────────────────────
+
     public void setJobParameters(JobParameters jobParameters) {
         this.jobParameters = jobParameters;
     }
 
-    @Override
-    public Integer call() { return execute(); }
+    // ── Callable<Integer> ─────────────────────────────────────────────────────
 
-    @Override
+    public Integer call() {
+        return execute();
+    }
+
+    // ── ManagedExecution entry point ──────────────────────────────────────────
+    // No @Override — matches AgedReportJob pattern exactly
+
     public Integer execute() {
         String feedName = getFeedName();
         // Default: yesterday (T-1). Override via Batchly parameter cobDate=yyyyMMdd
@@ -132,7 +125,7 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
 
         // ── Step 1: Load feed definition ──────────────────────────────────────
         logger.info("[GAI][{}] Step 1 — loading feed definition", feedName);
-        FeedDefinition def    = defLoader.load(feedName);
+        FeedDefinition def     = defLoader.load(feedName);
         String         fileDir = outputDir + "/" + feedName + "/" + cobDate;
 
         // ── Step 2: Query DB ──────────────────────────────────────────────────
