@@ -7,7 +7,7 @@ import org.apache.commons.configuration.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import javax.inject.Inject;
+import com.google.inject.Inject;
 import java.io.File;
 import java.util.ArrayList;
 import java.util.Arrays;

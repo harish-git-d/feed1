@@ -15,53 +15,43 @@ import com.citi.risk.scef.limitexposure.gai.service.GAISftpTransferService;
 import org.apache.commons.configuration.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.batch.core.JobParameters;
 
 import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.Callable;
 
 /**
  * Base class for all 6 GAI feed jobs.
  *
- * Follows the exact same pattern as AgedReportJob:
- *   extends JobInterfaceDefaultImpl
- *   implements Callable<Integer>, ManagedExecution, BatchParameterAware
+ * Aligned to JobInterfaceDefaultImpl (image 3-4):
+ *   - call() is already implemented in parent — do NOT override it
+ *   - execute() is abstract in parent (line 64) — override with @Override
+ *   - BatchParameterAware uses setBatchParameter(BatchParameter), not setJobParameters
  *
- * Default cobDate: yesterday (T-1). Override via Batchly parameter cobDate=yyyyMMdd.
+ * cobDate resolution (in priority order):
+ *   1. SCEF.gai.feed.cobDate property (set for scheduled/manual reruns)
+ *   2. Yesterday (T-1) — default for daily scheduled runs
+ *
+ * To run for a specific date, set in core.properties before launching:
+ *   LOCAL.*.*.SCEF.gai.feed.cobDate=20260521
+ * Clear it after the run to revert to T-1 default.
  */
 public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
-        implements Callable<Integer>, ManagedExecution, BatchParameterAware {
+        implements ManagedExecution, BatchParameterAware {
 
     private static final Logger logger = LoggerFactory.getLogger(AbstractGAIFeedJob.class);
     private static final DateTimeFormatter COB_FMT = DateTimeFormatter.ofPattern("yyyyMMdd");
 
-    private JobParameters jobParameters;
-
     protected abstract String getFeedName();
 
-    // ── BatchParameterAware ───────────────────────────────────────────────────
+    // ── ManagedExecution — abstract in JobInterfaceDefaultImpl (line 64) ─────
 
-    public void setJobParameters(JobParameters jobParameters) {
-        this.jobParameters = jobParameters;
-    }
-
-    // ── Callable<Integer> ─────────────────────────────────────────────────────
-
-    public Integer call() {
-        return execute();
-    }
-
-    // ── ManagedExecution entry point ──────────────────────────────────────────
-    // No @Override — matches AgedReportJob pattern exactly
-
+    @Override
     public Integer execute() {
         String feedName = getFeedName();
-        // Default: yesterday (T-1). Override via Batchly parameter cobDate=yyyyMMdd
-        String cobDate = resolveParam("cobDate", LocalDate.now().minusDays(1).format(COB_FMT));
+        String cobDate  = resolveCobDate();
 
         try {
             Configuration cfg = CRFGuiceContext.getInjector().getInstance(Configuration.class);
@@ -88,14 +78,12 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
             return 1;
 
         } catch (Exception e) {
-
-            // ── Log full stack trace ──────────────────────────────────────────
             logger.error("[GAI][{}] ===== JOB FAILED cobDate={} =====", feedName, cobDate);
             logger.error("[GAI][{}] Exception type   : {}", feedName, e.getClass().getName());
             logger.error("[GAI][{}] Exception message: {}", feedName, e.getMessage());
             logger.error("[GAI][{}] Full stack trace :", feedName, e);
 
-            // ── Failure email alert (never suppresses original exception) ─────
+            // Send failure alert (guarded — never suppresses original exception)
             try {
                 GAIEmailAlertService alertService =
                         CRFGuiceContext.getInjector().getInstance(GAIEmailAlertService.class);
@@ -105,7 +93,6 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
                              feedName, alertEx.getMessage());
             }
 
-            // ── Re-throw so Spring Batch marks step as FAILED ─────────────────
             throw new RuntimeException(
                     "[GAI] Feed FAILED: " + feedName + " cobDate=" + cobDate, e);
         }
@@ -184,13 +171,22 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
                     feedName, cobDate, ec, rc, ac);
     }
 
-    // ── Private ───────────────────────────────────────────────────────────────
+    // ── cobDate resolution ────────────────────────────────────────────────────
 
-    private String resolveParam(String key, String defaultValue) {
-        if (jobParameters != null) {
-            String v = jobParameters.getString(key);
-            if (v != null && v.trim().length() > 0) return v.trim();
-        }
-        return defaultValue;
+    private String resolveCobDate() {
+        try {
+            Configuration cfg = CRFGuiceContext.getInjector().getInstance(Configuration.class);
+            String configured = cfg.getString("SCEF.gai.feed.cobDate", "");
+            if (configured != null && configured.trim().length() > 0
+                    && configured.trim().matches("\\d{8}")) {
+                logger.info("[GAI] cobDate from property: {}", configured.trim());
+                return configured.trim();
+            }
+        } catch (Exception ignored) { }
+
+        // Default: yesterday (T-1) — standard COB convention
+        String yesterday = LocalDate.now().minusDays(1).format(COB_FMT);
+        logger.info("[GAI] cobDate defaulting to yesterday (T-1): {}", yesterday);
+        return yesterday;
     }
 }
