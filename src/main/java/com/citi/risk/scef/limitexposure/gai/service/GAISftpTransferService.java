@@ -17,22 +17,21 @@ import java.util.List;
 /**
  * SFTP transfer to GAI gateway using JSch — PEM private key auth only.
  *
- * Fixes applied vs original:
- *   - Configurable retries with exponential backoff (default 2 retries)
- *   - Each file uploaded as {name}.tmp then renamed to final name atomically
- *     so .ctrl can never arrive before the data files it references
- *   - PEM key file existence checked before attempting connection
- *   - All connection params validated before session creation
- *   - Configurable port, timeout, known_hosts, strict host key checking
+ * Exception handling:
+ *   - Missing/blank config params → IllegalStateException before any connection
+ *   - PEM key file not found      → IllegalStateException before any connection
+ *   - Connection failure          → JSchException, retried up to sftp.retries times
+ *   - Upload failure              → SftpException, retried up to sftp.retries times
+ *   - After all retries exhausted → last exception re-thrown to execute() catch block
+ *   - Session/channel always closed in finally block even on failure
  *
- * Transfer order enforced: EVENT → RECORD → ATTRIBUTE → .ctrl
- *
- * JSch dependency (add to scef/pom.xml if not present):
- *   <dependency>
- *     <groupId>com.github.mwiede</groupId>
- *     <artifactId>jsch</artifactId>
- *     <version>0.2.17</version>
- *   </dependency>
+ * Logging:
+ *   - INFO:  connection attempt with host:port
+ *   - INFO:  each file upload start + completion with size
+ *   - INFO:  overall transfer complete with file count
+ *   - WARN:  retry attempt with reason
+ *   - ERROR: final failure after all retries exhausted
+ *   - DEBUG: transfer order list before upload begins
  */
 public class GAISftpTransferService {
 
@@ -44,26 +43,47 @@ public class GAISftpTransferService {
     public GAISftpTransferService(Configuration cfg) { this.cfg = cfg; }
 
     /**
-     * Transfers all .dat.gz and .ctrl files in localDir to remotePath.
-     * Retries on failure up to SCEF.gai.feed.sftp.retries times.
+     * Transfers all .dat.gz + .ctrl files in localDir to remotePath.
+     * Transfer order enforced: EVENT → RECORD → ATTRIBUTE → .ctrl
      */
     public void transfer(String localDir, String remotePath,
                           String host, String user, String pemKeyPath) throws Exception {
+
+        // ── Validate all params before touching the network ───────────────────
+        requireNonBlank(host,       "SCEF.gai.feed.sftp.host");
+        requireNonBlank(user,       "SCEF.gai.feed.sftp.user");
+        requireNonBlank(remotePath, "SCEF.gai.feed.sftp.remote.path");
+        requireNonBlank(pemKeyPath, "SCEF.gai.feed.sftp.key.path");
+
+        File keyFile = new File(pemKeyPath);
+        if (!keyFile.exists()) {
+            logger.error("[GAI][SFTP] PEM key file not found: {}", pemKeyPath);
+            throw new IllegalStateException("PEM key file not found: " + pemKeyPath);
+        }
 
         int port      = cfg.getInt("SCEF.gai.feed.sftp.port", 22);
         int timeoutMs = cfg.getInt("SCEF.gai.feed.sftp.timeout.ms", 30000);
         int retries   = cfg.getInt("SCEF.gai.feed.sftp.retries", 2);
 
+        // ── Retry loop ────────────────────────────────────────────────────────
         Exception last = null;
         for (int attempt = 1; attempt <= retries + 1; attempt++) {
             try {
                 doTransfer(localDir, remotePath, host, user, pemKeyPath, port, timeoutMs);
-                return;
+                return;     // success — exit retry loop
             } catch (Exception e) {
                 last = e;
-                logger.warn("[GAI][SFTP] attempt {}/{} failed: {}", attempt, retries + 1, e.getMessage());
                 if (attempt <= retries) {
-                    Thread.sleep(2000L * attempt);
+                    long backoffMs = 2000L * attempt;
+                    logger.warn("[GAI][SFTP] Attempt {}/{} failed — retrying in {}ms. Reason: {}",
+                                attempt, retries + 1, backoffMs, e.getMessage());
+                    try { Thread.sleep(backoffMs); } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        throw e;
+                    }
+                } else {
+                    logger.error("[GAI][SFTP] All {} attempts failed. Last error: {}",
+                                 retries + 1, e.getMessage(), e);
                 }
             }
         }
@@ -76,17 +96,6 @@ public class GAISftpTransferService {
                              String host, String user, String pemKeyPath,
                              int port, int timeoutMs) throws Exception {
 
-        // Validate all inputs before touching the network
-        requireNonBlank(host,       "SCEF.gai.feed.sftp.host");
-        requireNonBlank(user,       "SCEF.gai.feed.sftp.user");
-        requireNonBlank(remotePath, "SCEF.gai.feed.sftp.remote.path");
-        requireNonBlank(pemKeyPath, "SCEF.gai.feed.sftp.key.path");
-
-        File keyFile = new File(pemKeyPath);
-        if (!keyFile.exists()) {
-            throw new IllegalStateException("PEM key file not found: " + pemKeyPath);
-        }
-
         logger.info("[GAI][SFTP] Connecting to {}@{}:{}", user, host, port);
 
         JSch jsch = new JSch();
@@ -97,7 +106,7 @@ public class GAISftpTransferService {
             jsch.setKnownHosts(knownHosts);
         }
 
-        Session session = null;
+        Session    session = null;
         ChannelSftp channel = null;
         try {
             session = jsch.getSession(user, host, port);
@@ -105,33 +114,44 @@ public class GAISftpTransferService {
             session.setConfig("StrictHostKeyChecking", strict ? "yes" : "no");
             session.setTimeout(timeoutMs);
             session.connect(timeoutMs);
+            logger.info("[GAI][SFTP] Session established to {}@{}", user, host);
 
             channel = (ChannelSftp) session.openChannel("sftp");
             channel.connect(timeoutMs);
             channel.cd(remotePath);
+            logger.info("[GAI][SFTP] Changed to remote directory: {}", remotePath);
 
             List<File> files = orderedFiles(localDir);
+            logger.debug("[GAI][SFTP] Transfer order: {}",
+                         files.stream().map(File::getName).reduce((a, b) -> a + ", " + b).orElse(""));
+
             for (File f : files) {
                 String tmpName   = f.getName() + ".tmp";
                 String finalName = f.getName();
-                logger.info("[GAI][SFTP] uploading {} ({} bytes)", finalName, f.length());
-                // Upload as .tmp first — rename to final only when complete
+                logger.info("[GAI][SFTP] Uploading {} ({} bytes)", finalName, f.length());
+
+                // Upload as .tmp, rename to final — ctrl file only appears complete
                 channel.put(f.getAbsolutePath(), tmpName);
                 channel.rename(tmpName, finalName);
-                logger.info("[GAI][SFTP] uploaded {}", finalName);
+                logger.info("[GAI][SFTP] Uploaded and renamed → {}", finalName);
             }
 
-            logger.info("[GAI][SFTP] transfer complete — {} files → {}:{}", files.size(), host, remotePath);
+            logger.info("[GAI][SFTP] Transfer complete — {} files → {}:{}",
+                        files.size(), host, remotePath);
 
+        } catch (Exception e) {
+            logger.error("[GAI][SFTP] Transfer failed to {}:{} — {}", host, remotePath, e.getMessage(), e);
+            throw e;
         } finally {
             if (channel != null) try { channel.disconnect(); } catch (Exception ignored) { }
             if (session != null) try { session.disconnect(); } catch (Exception ignored) { }
+            logger.debug("[GAI][SFTP] Session and channel closed");
         }
     }
 
     /**
-     * Returns files sorted in mandatory GAI transfer order:
-     * EVENT → RECORD → ATTRIBUTE → .ctrl  (.ctrl triggers GAI processing — must be last)
+     * Returns files in mandatory GAI transfer order:
+     *   EVENT → RECORD → ATTRIBUTE → .ctrl  (ctrl triggers GAI processing — must be last)
      */
     private List<File> orderedFiles(String localDir) {
         File dir = new File(localDir);
@@ -141,6 +161,7 @@ public class GAISftpTransferService {
             }
         });
         if (all == null || all.length == 0) {
+            logger.error("[GAI][SFTP] No .dat.gz or .ctrl files found in: {}", localDir);
             throw new IllegalStateException("No GAI files found to transfer in: " + localDir);
         }
         List<File> files = new ArrayList<File>(Arrays.asList(all));
@@ -162,6 +183,7 @@ public class GAISftpTransferService {
 
     private void requireNonBlank(String value, String propertyName) {
         if (value == null || value.trim().length() == 0) {
+            logger.error("[GAI][SFTP] Required property is blank: {}", propertyName);
             throw new IllegalStateException("Required SFTP property is blank: " + propertyName);
         }
     }

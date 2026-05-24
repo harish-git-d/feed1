@@ -3,6 +3,7 @@ package com.citi.risk.scef.limitexposure.gai.service;
 import com.citi.risk.scef.limitexposure.gai.domain.FeedDefinition;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.yaml.snakeyaml.LoaderOptions;
 import org.yaml.snakeyaml.Yaml;
 import org.yaml.snakeyaml.constructor.Constructor;
 
@@ -15,17 +16,14 @@ import java.util.concurrent.ConcurrentHashMap;
  * Loads and validates feed definition YAML files from:
  *   classpath:gai/feed-definitions/{feedName}.yml
  *
- * Place YAML files in:
- *   scef-war/src/main/resources/gai/feed-definitions/
- *
- * Results are cached after first load.
- * SnakeYAML is a transitive Spring dependency — already available in scef-war.
+ * SnakeYAML 2.x API:
+ *   Constructor(Class, LoaderOptions) — replaces Constructor(Class) from 1.x
+ *   yaml.load(InputStream)           — replaces loadAs(InputStream, Class)
  */
 public class GAIFeedDefinitionLoader {
 
     private static final Logger logger = LoggerFactory.getLogger(GAIFeedDefinitionLoader.class);
 
-    // Java 8 compatible explicit type parameter
     private final Map<String, FeedDefinition> cache = new ConcurrentHashMap<String, FeedDefinition>();
 
     @Inject
@@ -45,7 +43,10 @@ public class GAIFeedDefinitionLoader {
             if (is == null) {
                 throw new IllegalStateException("Feed definition not found on classpath: " + path);
             }
-            Yaml yaml = new Yaml(new Constructor(FeedDefinition.class));
+            // SnakeYAML 2.x: Constructor(Class, LoaderOptions)
+            // SnakeYAML 1.x used Constructor(Class) — removed in 2.x
+            // LoaderOptions uses defaults (max aliases=50, code points=3MB)
+            Yaml yaml = new Yaml(new Constructor(FeedDefinition.class, new LoaderOptions()));
             FeedDefinition def = yaml.load(is);
             if (def == null) {
                 throw new IllegalStateException("Feed definition is empty: " + path);

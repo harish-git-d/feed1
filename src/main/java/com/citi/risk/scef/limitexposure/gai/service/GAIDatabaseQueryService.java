@@ -15,14 +15,19 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Executes the 18 GAI SQL files against SCEF's existing Oracle DataSource.
+ * Executes GAI SQL files using SCEF's existing Oracle DataSource.
  *
- * Uses NamedParameterJdbcTemplate so SQL files can optionally filter by COB date:
- *   WHERE TO_CHAR(r.COB_DATE, 'YYYYMMDD') = :cobDateYYYYMMDD
- *   WHERE r.COB_DATE = TO_DATE(:cobDateMMDDYYYY, 'MMDDYYYY')
+ * Exception handling:
+ *   - SQL file not found on classpath → IllegalStateException (startup/config issue)
+ *   - SQL file unreadable             → RuntimeException wrapping IOException
+ *   - Query execution failure         → DataAccessException (Spring) propagates up
+ *   - All exceptions propagate to AbstractGAIFeedJob.execute() catch block
  *
- * SQL loaded from classpath: gai/sql/{feedName}_{fileType}_query.sql
- * DataSource: @Named("scef-ods") — reuses SCEF's existing Oracle connection pool.
+ * Logging:
+ *   - DEBUG: SQL path being loaded
+ *   - WARN:  SQL has no :cobDate filter (risk of full-history extract)
+ *   - INFO:  row count + elapsed ms per query
+ *   - ERROR: SQL load failure with path
  */
 public class GAIDatabaseQueryService {
 
@@ -36,39 +41,55 @@ public class GAIDatabaseQueryService {
     }
 
     /**
-     * Runs the SQL for one feed + file type combination.
-     *
+     * Runs one SQL file for the given feed + file type.
      * @param feedName e.g. "stress-exposure"
      * @param fileType "event", "record", or "attribute"
      * @param cobDate  yyyyMMdd e.g. "20260522"
      */
     public List<Map<String, Object>> query(String feedName, String fileType, String cobDate) {
         String sqlPath = String.format("gai/sql/%s_%s_query.sql", feedName, fileType.toLowerCase());
-        String sql = loadSql(sqlPath);
+
+        logger.debug("[GAI][{}][{}] Loading SQL from classpath: {}", feedName, fileType, sqlPath);
+        String sql = loadSql(sqlPath, feedName, fileType);
+
+        // Warn if SQL has no cobDate bind — could extract full history
+        if (!sql.contains(":cobDate") && !sql.contains(":cobDateYYYYMMDD")) {
+            logger.warn("[GAI][{}][{}] SQL has no :cobDate or :cobDateYYYYMMDD bind parameter. " +
+                        "This may extract full history on every run. File: {}",
+                        feedName, fileType, sqlPath);
+        }
 
         MapSqlParameterSource params = new MapSqlParameterSource();
         params.addValue("cobDate",          cobDate);
         params.addValue("cobDateYYYYMMDD",  cobDate);
         params.addValue("cobDateMMDDYYYY",  toMmDdYyyy(cobDate));
 
-        if (!sql.contains(":cobDate")) {
-            logger.warn("[GAI][{}][{}] SQL has no :cobDate bind parameter — verify it does not " +
-                        "extract full history: {}", feedName, fileType, sqlPath);
+        long start = System.currentTimeMillis();
+        List<Map<String, Object>> rows;
+        try {
+            rows = jdbc.queryForList(sql, params);
+        } catch (Exception e) {
+            logger.error("[GAI][{}][{}] Query execution failed. cobDate={} SQL={}",
+                         feedName, fileType, cobDate, sqlPath);
+            logger.error("[GAI][{}][{}] Exception: {}", feedName, fileType, e.getMessage(), e);
+            throw e;    // propagates to execute() catch block
         }
 
-        long start = System.currentTimeMillis();
-        List<Map<String, Object>> rows = jdbc.queryForList(sql, params);
-        logger.info("[GAI][{}][{}] rows={} elapsedMs={}", feedName, fileType,
-                    rows.size(), System.currentTimeMillis() - start);
+        long elapsed = System.currentTimeMillis() - start;
+        logger.info("[GAI][{}][{}] rows={} elapsedMs={} cobDate={}",
+                    feedName, fileType, rows.size(), elapsed, cobDate);
         return rows;
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────────
+    // ── Private ───────────────────────────────────────────────────────────────
 
-    private String loadSql(String classpathResource) {
+    private String loadSql(String classpathResource, String feedName, String fileType) {
         try (InputStream is = getClass().getClassLoader().getResourceAsStream(classpathResource)) {
             if (is == null) {
-                throw new IllegalStateException("GAI SQL not found on classpath: " + classpathResource);
+                logger.error("[GAI][{}][{}] SQL file not found on classpath: {}",
+                             feedName, fileType, classpathResource);
+                throw new IllegalStateException(
+                        "GAI SQL file not found on classpath: " + classpathResource);
             }
             // Java 8 compatible — no readAllBytes()
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -78,12 +99,16 @@ public class GAIDatabaseQueryService {
                 baos.write(buf, 0, len);
             }
             return new String(baos.toByteArray(), StandardCharsets.UTF_8);
+        } catch (IllegalStateException e) {
+            throw e;    // already logged above
         } catch (Exception e) {
+            logger.error("[GAI][{}][{}] Failed to read SQL file: {} — {}",
+                         feedName, fileType, classpathResource, e.getMessage(), e);
             throw new RuntimeException("Failed to load GAI SQL: " + classpathResource, e);
         }
     }
 
-    /** Converts yyyyMMdd → MMddyyyy for Oracle TO_DATE patterns */
+    /** Converts yyyyMMdd → MMddyyyy for Oracle TO_DATE(:cobDateMMDDYYYY, 'MMDDYYYY') */
     private String toMmDdYyyy(String yyyyMMdd) {
         if (yyyyMMdd == null || yyyyMMdd.length() != 8) return yyyyMMdd;
         return yyyyMMdd.substring(4, 6) + yyyyMMdd.substring(6, 8) + yyyyMMdd.substring(0, 4);
