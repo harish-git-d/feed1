@@ -1,5 +1,6 @@
 package com.citi.risk.scef.limitexposure.gai.service;
 
+import com.citi.risk.scef.limitexposure.service.CommonEmailSendService;
 import org.apache.commons.configuration.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -10,44 +11,35 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 
 /**
- * Sends HTML email alerts for GAI feed issues using SCEF's existing
- * CommonEmailSendService — same injection pattern as AgedReportJob.
+ * Sends HTML email alerts for GAI feed issues.
  *
- * ── INTEGRATION STEPS ────────────────────────────────────────────────────────
- * 1. In IntelliJ, search for:  CommonEmailSendService
- *    Note the full package name (e.g. com.citi.risk.scef.limitexposure.service.CommonEmailSendService)
- *    Replace the TODO_PACKAGE import below.
+ * Uses SCEF's existing CommonEmailSendService — confirmed from SCEFModule.java line 125:
+ *   bind(CommonEmailSendService.class)
+ *       .annotatedWith(Names.named("emailSendServiceImpl"))
+ *       .to(EmailSendServiceImpl.class);
  *
- * 2. Search for: emailSendService.sendEmail(
- *    in AgedReportJob or EmailSendServiceImpl to find the EmailDto/email object class.
- *    Replace TODO_EMAIL_CLASS below and fill in the setter calls in send().
+ * Three alert types:
+ *   sendZeroRowsAlert()    — all 3 queries returned 0 rows
+ *   sendRowMismatchAlert() — event/record/attribute counts differ (one is 0)
+ *   sendFailureAlert()     — unhandled exception during job execution
  *
- * 3. Add to core.properties:
- *    SCEF.gai.feed.alert.enabled=true
- *    SCEF.gai.feed.alert.recipients=your-team@citi.com
- *    SCEF.gai.feed.alert.from=scef-noreply@citi.com
- *    SCEF.gai.feed.alert.subject.prefix=[SCEF-GAI]
- * ─────────────────────────────────────────────────────────────────────────────
- *
- * Three alert scenarios:
- *   sendZeroRowsAlert()     — all 3 queries returned 0 rows
- *   sendRowMismatchAlert()  — event/record/attribute counts differ (one is 0)
- *   sendFailureAlert()      — unhandled exception in job
+ * Properties required in core.properties:
+ *   SCEF.gai.feed.alert.enabled=true
+ *   SCEF.gai.feed.alert.recipients=team@citi.com
+ *   SCEF.gai.feed.alert.from=scef-noreply@citi.com
+ *   SCEF.gai.feed.alert.subject.prefix=[SCEF-GAI]
  */
 public class GAIEmailAlertService {
 
     private static final Logger logger = LoggerFactory.getLogger(GAIEmailAlertService.class);
     private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
-    // TODO_PACKAGE: replace with the actual import from your SCEF codebase
-    // Search IntelliJ for: @Named("emailSendServiceImpl")
-    // Example: com.citi.risk.scef.limitexposure.service.CommonEmailSendService
-    private final Object emailSendService;
+    private final CommonEmailSendService emailSendService;
     private final Configuration cfg;
 
     @Inject
     public GAIEmailAlertService(
-            @Named("emailSendServiceImpl") Object emailSendService,
+            @Named("emailSendServiceImpl") CommonEmailSendService emailSendService,
             Configuration cfg) {
         this.emailSendService = emailSendService;
         this.cfg = cfg;
@@ -57,10 +49,8 @@ public class GAIEmailAlertService {
 
     public void sendZeroRowsAlert(String feedName, String cobDate) {
         if (!alertEnabled()) return;
-
         String subject = prefix() + " ZERO ROWS — " + feedName + " cobDate=" + cobDate;
-        String body = buildBody("GAI Feed — Zero rows returned",
-                feedName, cobDate,
+        String body = buildBody("GAI Feed — Zero rows returned", feedName, cobDate,
                 "All three queries (EVENT, RECORD, ATTRIBUTE) returned 0 rows. " +
                 "No files were generated.<br><br>Possible causes:" +
                 "<ul>" +
@@ -69,7 +59,6 @@ public class GAIEmailAlertService {
                 "<li>REQUEST_TYPE filter in SQL does not match live data</li>" +
                 "</ul>",
                 "WARNING");
-
         send(subject, body, feedName);
     }
 
@@ -78,10 +67,8 @@ public class GAIEmailAlertService {
     public void sendRowMismatchAlert(String feedName, String cobDate,
                                       int eventCount, int recordCount, int attributeCount) {
         if (!alertEnabled()) return;
-
         String subject = prefix() + " ROW MISMATCH — " + feedName + " cobDate=" + cobDate;
-        String body = buildBody("GAI Feed — Row count mismatch",
-                feedName, cobDate,
+        String body = buildBody("GAI Feed — Row count mismatch", feedName, cobDate,
                 "One or more file types returned 0 rows. No files were generated.<br><br>" +
                 "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse'>" +
                 "<tr style='background:#eee'><th>File Type</th><th>Row Count</th><th>Status</th></tr>" +
@@ -90,7 +77,6 @@ public class GAIEmailAlertService {
                 "<tr><td>ATTRIBUTE</td><td>" + attributeCount + "</td><td>" + rowStatus(attributeCount) + "</td></tr>" +
                 "</table>",
                 "WARNING");
-
         send(subject, body, feedName);
     }
 
@@ -98,16 +84,13 @@ public class GAIEmailAlertService {
 
     public void sendFailureAlert(String feedName, String cobDate, Exception e) {
         if (!alertEnabled()) return;
-
         String subject = prefix() + " FAILED — " + feedName + " cobDate=" + cobDate;
-        String body = buildBody("GAI Feed — Job failed",
-                feedName, cobDate,
-                "<b>Error:</b> "      + escapeHtml(e.getMessage())   + "<br>" +
-                "<b>Root cause:</b> " + escapeHtml(rootCause(e))     + "<br><br>" +
+        String body = buildBody("GAI Feed — Job failed", feedName, cobDate,
+                "<b>Error:</b> "      + escapeHtml(e.getMessage()) + "<br>" +
+                "<b>Root cause:</b> " + escapeHtml(rootCause(e))   + "<br><br>" +
                 "Spring Batch will mark this step as FAILED.<br>" +
                 "Check Splunk or the Jetty log for the full stack trace.",
                 "CRITICAL");
-
         send(subject, body, feedName);
     }
 
@@ -119,29 +102,25 @@ public class GAIEmailAlertService {
             String from       = cfg.getString("SCEF.gai.feed.alert.from", "scef-noreply@citi.com");
 
             if (recipients == null || recipients.trim().length() == 0) {
-                logger.warn("[GAI][EMAIL] SCEF.gai.feed.alert.recipients not set — alert suppressed: {}", subject);
+                logger.warn("[GAI][EMAIL] SCEF.gai.feed.alert.recipients not set — alert suppressed: {}",
+                            subject);
                 return;
             }
 
-            // TODO_EMAIL_CLASS: replace Object with SCEF's actual email DTO class.
-            // Search AgedReportJob for: emailSendService.sendEmail(
-            // That will show you the class and its setters.
-            // Common pattern:
-            //
-            //   EmailDto email = new EmailDto();
-            //   email.setTo(recipients);
-            //   email.setFrom(from);
-            //   email.setSubject(subject);
-            //   email.setBody(htmlBody);
-            //   email.setHtml(true);
-            //   emailSendService.sendEmail(email);
+            // Uses the same EmailDto pattern as the rest of SCEF
+            com.citi.risk.scef.limitexposure.domain.EmailDto email =
+                    new com.citi.risk.scef.limitexposure.domain.EmailDto();
+            email.setTo(recipients);
+            email.setFrom(from);
+            email.setSubject(subject);
+            email.setBody(htmlBody);
 
-            logger.warn("[GAI][EMAIL] TODO_EMAIL_CLASS: wire up actual email DTO. " +
-                        "Subject would be: {}", subject);
+            emailSendService.sendEmail(email);
+            logger.info("[GAI][EMAIL] Alert sent: {}", subject);
 
         } catch (Exception ex) {
-            // Alert failure must never suppress the original job exception
-            logger.error("[GAI][EMAIL] Failed to send alert: {} — {}", subject, ex.getMessage());
+            // Alert failure must NEVER suppress the original job exception
+            logger.error("[GAI][EMAIL] Failed to send alert '{}': {}", subject, ex.getMessage());
         }
     }
 
@@ -158,9 +137,9 @@ public class GAIEmailAlertService {
                "<tr><td><b>COB Date</b></td><td>" + cobDate  + "</td></tr>" +
                "<tr><td><b>Severity</b></td><td><b style='color:" + colour + "'>" + severity + "</b></td></tr>" +
                "<tr><td><b>Time</b></td><td>"     + now      + "</td></tr>" +
-               "</table><br><hr style='border:none;border-top:1px solid #ccc'/><br>" +
+               "</table><br><hr/><br>" +
                "<div>" + detail + "</div>" +
-               "<br><hr style='border:none;border-top:1px solid #eee'/>" +
+               "<br><hr/>" +
                "<p style='color:#aaa;font-size:11px'>SCEF GAI Feed automated alert. Do not reply.</p>" +
                "</body></html>";
     }
