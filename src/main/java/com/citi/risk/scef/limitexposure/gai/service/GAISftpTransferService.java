@@ -1,168 +1,219 @@
 package com.citi.risk.scef.limitexposure.gai.service;
 
-import com.jcraft.jsch.ChannelSftp;
-import com.jcraft.jsch.JSch;
-import com.jcraft.jsch.Session;
+import com.google.inject.Inject;
 import org.apache.commons.configuration.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.inject.Inject;
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
- * SFTP transfer to GAI gateway using JSch — PEM private key auth only.
+ * SFTP transfer using sftp.sh bundled inside scef-war.
  *
- * Exception handling:
- *   - Missing/blank config params → IllegalStateException before any connection
- *   - PEM key file not found      → IllegalStateException before any connection
- *   - Connection failure          → JSchException, retried up to sftp.retries times
- *   - Upload failure              → SftpException, retried up to sftp.retries times
- *   - After all retries exhausted → last exception re-thrown to execute() catch block
- *   - Session/channel always closed in finally block even on failure
+ * sftp.sh is packaged at:
+ *   scef-war/src/main/resources/gai/sftp.sh
  *
- * Logging:
- *   - INFO:  connection attempt with host:port
- *   - INFO:  each file upload start + completion with size
- *   - INFO:  overall transfer complete with file count
- *   - WARN:  retry attempt with reason
- *   - ERROR: final failure after all retries exhausted
- *   - DEBUG: transfer order list before upload begins
+ * At runtime it is extracted once to:
+ *   {SCEF.gai.feed.output.dir}/sftp.sh
+ * and made executable before use.
+ *
+ * Script signature (confirmed from server):
+ *   sftp.sh <SRC_FILE> <DEST_PATH> <USER> <REMOTE_HOST>
+ *
+ * Transfer order: EVENT → RECORD → ATTRIBUTE → .ctrl
+ * The .ctrl file must arrive last — it triggers GAI processing.
  */
 public class GAISftpTransferService {
 
     private static final Logger logger = LoggerFactory.getLogger(GAISftpTransferService.class);
 
+    private static final String SCRIPT_RESOURCE = "gai/sftp.sh";
+
     private final Configuration cfg;
 
+    /** Cached path of the extracted script — extracted once per JVM lifetime */
+    private volatile String extractedScriptPath;
+
     @Inject
-    public GAISftpTransferService(Configuration cfg) { this.cfg = cfg; }
+    public GAISftpTransferService(Configuration cfg) {
+        this.cfg = cfg;
+    }
 
     /**
-     * Transfers all .dat.gz + .ctrl files in localDir to remotePath.
-     * Transfer order enforced: EVENT → RECORD → ATTRIBUTE → .ctrl
+     * Transfers all .dat.gz and .ctrl files in localDir via sftp.sh.
      */
     public void transfer(String localDir, String remotePath,
                           String host, String user, String pemKeyPath) throws Exception {
 
-        // ── Validate all params before touching the network ───────────────────
         requireNonBlank(host,       "SCEF.gai.feed.sftp.host");
         requireNonBlank(user,       "SCEF.gai.feed.sftp.user");
         requireNonBlank(remotePath, "SCEF.gai.feed.sftp.remote.path");
-        requireNonBlank(pemKeyPath, "SCEF.gai.feed.sftp.key.path");
 
-        File keyFile = new File(pemKeyPath);
-        if (!keyFile.exists()) {
-            logger.error("[GAI][SFTP] PEM key file not found: {}", pemKeyPath);
-            throw new IllegalStateException("PEM key file not found: " + pemKeyPath);
+        String scriptPath = getOrExtractScript(localDir);
+        int timeoutMs     = cfg.getInt("SCEF.gai.feed.sftp.timeout.ms", 60000);
+
+        List<File> files  = orderedFiles(localDir);
+        logger.info("[GAI][SFTP] Transferring {} files to {}:{}", files.size(), host, remotePath);
+
+        for (File f : files) {
+            transferOneFile(f, remotePath, user, host, scriptPath, timeoutMs);
         }
 
-        int port      = cfg.getInt("SCEF.gai.feed.sftp.port", 22);
-        int timeoutMs = cfg.getInt("SCEF.gai.feed.sftp.timeout.ms", 30000);
-        int retries   = cfg.getInt("SCEF.gai.feed.sftp.retries", 2);
-
-        // ── Retry loop ────────────────────────────────────────────────────────
-        Exception last = null;
-        for (int attempt = 1; attempt <= retries + 1; attempt++) {
-            try {
-                doTransfer(localDir, remotePath, host, user, pemKeyPath, port, timeoutMs);
-                return;     // success — exit retry loop
-            } catch (Exception e) {
-                last = e;
-                if (attempt <= retries) {
-                    long backoffMs = 2000L * attempt;
-                    logger.warn("[GAI][SFTP] Attempt {}/{} failed — retrying in {}ms. Reason: {}",
-                                attempt, retries + 1, backoffMs, e.getMessage());
-                    try { Thread.sleep(backoffMs); } catch (InterruptedException ie) {
-                        Thread.currentThread().interrupt();
-                        throw e;
-                    }
-                } else {
-                    logger.error("[GAI][SFTP] All {} attempts failed. Last error: {}",
-                                 retries + 1, e.getMessage(), e);
-                }
-            }
-        }
-        throw last;
+        logger.info("[GAI][SFTP] All {} files transferred to {}:{}", files.size(), host, remotePath);
     }
 
-    // ── Private ───────────────────────────────────────────────────────────────
-
-    private void doTransfer(String localDir, String remotePath,
-                             String host, String user, String pemKeyPath,
-                             int port, int timeoutMs) throws Exception {
-
-        logger.info("[GAI][SFTP] Connecting to {}@{}:{}", user, host, port);
-
-        JSch jsch = new JSch();
-        jsch.addIdentity(pemKeyPath);
-
-        String knownHosts = cfg.getString("SCEF.gai.feed.sftp.known.hosts", "");
-        if (knownHosts != null && knownHosts.trim().length() > 0) {
-            jsch.setKnownHosts(knownHosts);
-        }
-
-        Session    session = null;
-        ChannelSftp channel = null;
-        try {
-            session = jsch.getSession(user, host, port);
-            boolean strict = cfg.getBoolean("SCEF.gai.feed.sftp.strict.host.key.checking", false);
-            session.setConfig("StrictHostKeyChecking", strict ? "yes" : "no");
-            session.setTimeout(timeoutMs);
-            session.connect(timeoutMs);
-            logger.info("[GAI][SFTP] Session established to {}@{}", user, host);
-
-            channel = (ChannelSftp) session.openChannel("sftp");
-            channel.connect(timeoutMs);
-            channel.cd(remotePath);
-            logger.info("[GAI][SFTP] Changed to remote directory: {}", remotePath);
-
-            List<File> files = orderedFiles(localDir);
-            logger.debug("[GAI][SFTP] Transfer order: {}",
-                         files.stream().map(File::getName).reduce((a, b) -> a + ", " + b).orElse(""));
-
-            for (File f : files) {
-                String tmpName   = f.getName() + ".tmp";
-                String finalName = f.getName();
-                logger.info("[GAI][SFTP] Uploading {} ({} bytes)", finalName, f.length());
-
-                // Upload as .tmp, rename to final — ctrl file only appears complete
-                channel.put(f.getAbsolutePath(), tmpName);
-                channel.rename(tmpName, finalName);
-                logger.info("[GAI][SFTP] Uploaded and renamed → {}", finalName);
-            }
-
-            logger.info("[GAI][SFTP] Transfer complete — {} files → {}:{}",
-                        files.size(), host, remotePath);
-
-        } catch (Exception e) {
-            logger.error("[GAI][SFTP] Transfer failed to {}:{} — {}", host, remotePath, e.getMessage(), e);
-            throw e;
-        } finally {
-            if (channel != null) try { channel.disconnect(); } catch (Exception ignored) { }
-            if (session != null) try { session.disconnect(); } catch (Exception ignored) { }
-            logger.debug("[GAI][SFTP] Session and channel closed");
-        }
-    }
+    // ── Script extraction ─────────────────────────────────────────────────────
 
     /**
-     * Returns files in mandatory GAI transfer order:
-     *   EVENT → RECORD → ATTRIBUTE → .ctrl  (ctrl triggers GAI processing — must be last)
+     * Returns the path to sftp.sh, extracting from the WAR classpath if needed.
+     *
+     * Re-extracts if:
+     *   - Never extracted yet (first run)
+     *   - File was deleted (temp cleanup, server restart, manual deletion)
+     *
+     * Thread-safe via double-checked locking.
      */
+    private String getOrExtractScript(String localDir) throws Exception {
+        // Fast path — already extracted and file still exists
+        if (extractedScriptPath != null && new File(extractedScriptPath).exists()) {
+            logger.debug("[GAI][SFTP] Using cached sftp.sh: {}", extractedScriptPath);
+            return extractedScriptPath;
+        }
+        // Slow path — extract (or re-extract if file was deleted)
+        synchronized (this) {
+            if (extractedScriptPath != null && new File(extractedScriptPath).exists()) {
+                return extractedScriptPath;
+            }
+            if (extractedScriptPath != null) {
+                // File was deleted after previous extraction — re-extracting
+                logger.warn("[GAI][SFTP] sftp.sh was deleted from cache path: {} " +
+                            "— re-extracting from WAR classpath", extractedScriptPath);
+            }
+            extractedScriptPath = extractScript(localDir);
+        }
+        return extractedScriptPath;
+    }
+
+    private String extractScript(String localDir) throws Exception {
+        // Extract to the gai output base dir (parent of feed-specific subdirs)
+        // e.g. /opt/scef/gai/staging/sftp.sh
+        String outputBase = Paths.get(localDir).getParent() != null
+                ? Paths.get(localDir).getParent().toString()
+                : localDir;
+        Files.createDirectories(Paths.get(outputBase));
+
+        String destPath = outputBase + File.separator + "sftp.sh";
+        File destFile   = new File(destPath);
+
+        try (InputStream is = getClass().getClassLoader()
+                                        .getResourceAsStream(SCRIPT_RESOURCE)) {
+            if (is == null) {
+                throw new IllegalStateException(
+                        "[GAI][SFTP] sftp.sh not found on classpath: " + SCRIPT_RESOURCE +
+                        ". Ensure gai/sftp.sh is in scef-war/src/main/resources/gai/");
+            }
+            try (FileOutputStream fos = new FileOutputStream(destFile)) {
+                byte[] buf = new byte[4096];
+                int len;
+                while ((len = is.read(buf)) != -1) fos.write(buf, 0, len);
+            }
+        }
+
+        // chmod +x — required for /bin/sh execution
+        try {
+            Set<PosixFilePermission> perms = new HashSet<PosixFilePermission>();
+            perms.add(PosixFilePermission.OWNER_READ);
+            perms.add(PosixFilePermission.OWNER_WRITE);
+            perms.add(PosixFilePermission.OWNER_EXECUTE);
+            perms.add(PosixFilePermission.GROUP_READ);
+            perms.add(PosixFilePermission.GROUP_EXECUTE);
+            Files.setPosixFilePermissions(Paths.get(destPath), perms);
+        } catch (UnsupportedOperationException e) {
+            // Windows (LOCAL dev) — Posix permissions not supported, skip
+            logger.debug("[GAI][SFTP] Posix chmod skipped (Windows)");
+        }
+
+        logger.info("[GAI][SFTP] sftp.sh extracted to: {}", destPath);
+        return destPath;
+    }
+
+    // ── Transfer ──────────────────────────────────────────────────────────────
+
+    private void transferOneFile(File srcFile, String remotePath,
+                                  String user, String host,
+                                  String scriptPath, int timeoutMs) throws Exception {
+
+        // sftp.sh <SRC_FILE> <DEST_PATH> <USER> <REMOTE_HOST>
+        String[] cmd = { "/bin/sh", scriptPath,
+                          srcFile.getAbsolutePath(), remotePath, user, host };
+
+        logger.info("[GAI][SFTP] Sending {} ({} bytes)", srcFile.getName(), srcFile.length());
+        logger.debug("[GAI][SFTP] cmd: /bin/sh {} {} {} {} {}",
+                     scriptPath, srcFile.getAbsolutePath(), remotePath, user, host);
+
+        Process proc = Runtime.getRuntime().exec(cmd);
+
+        StringBuilder output = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(
+                new InputStreamReader(proc.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                logger.debug("[GAI][SFTP][out] {}", line);
+                output.append(line).append("\n");
+            }
+        }
+
+        // Poll with timeout — same as AgedReportJob.deleteFileUnused()
+        long start = System.currentTimeMillis();
+        while (proc.isAlive()) {
+            if (System.currentTimeMillis() - start > timeoutMs) {
+                proc.destroy();
+                throw new IllegalStateException(
+                        "[GAI][SFTP] Timeout after " + timeoutMs + "ms for: " + srcFile.getName());
+            }
+            try { Thread.sleep(500); } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw ie;
+            }
+        }
+
+        int exitCode = proc.exitValue();
+        if (exitCode == 0) {
+            logger.info("[GAI][SFTP] Sent: {}", srcFile.getName());
+        } else {
+            logger.error("[GAI][SFTP] Failed (exit={}) for: {}\nOutput:\n{}",
+                         exitCode, srcFile.getName(), output);
+            throw new RuntimeException(
+                    "[GAI][SFTP] Transfer failed (exit=" + exitCode + ") for: " + srcFile.getName());
+        }
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────────
+
     private List<File> orderedFiles(String localDir) {
-        File dir = new File(localDir);
+        File dir  = new File(localDir);
         File[] all = dir.listFiles(new java.io.FilenameFilter() {
             public boolean accept(File d, String name) {
                 return name.endsWith(".dat.gz") || name.endsWith(".ctrl");
             }
         });
         if (all == null || all.length == 0) {
-            logger.error("[GAI][SFTP] No .dat.gz or .ctrl files found in: {}", localDir);
-            throw new IllegalStateException("No GAI files found to transfer in: " + localDir);
+            throw new IllegalStateException(
+                    "[GAI][SFTP] No .dat.gz or .ctrl files in: " + localDir);
         }
         List<File> files = new ArrayList<File>(Arrays.asList(all));
         files.sort(new Comparator<File>() {
@@ -170,6 +221,9 @@ public class GAISftpTransferService {
                 return Integer.compare(order(a.getName()), order(b.getName()));
             }
         });
+        logger.debug("[GAI][SFTP] Order: {}",
+                     files.stream().map(File::getName)
+                          .reduce((a, b) -> a + " → " + b).orElse(""));
         return files;
     }
 
@@ -183,8 +237,8 @@ public class GAISftpTransferService {
 
     private void requireNonBlank(String value, String propertyName) {
         if (value == null || value.trim().length() == 0) {
-            logger.error("[GAI][SFTP] Required property is blank: {}", propertyName);
-            throw new IllegalStateException("Required SFTP property is blank: " + propertyName);
+            throw new IllegalStateException(
+                    "[GAI][SFTP] Required property is blank: " + propertyName);
         }
     }
 }
