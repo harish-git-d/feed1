@@ -1,0 +1,65 @@
+================================================================
+GAI Feed Quartz Scheduling — Registration Instructions
+================================================================
+
+STEP 1 — Find SCEFSpringQuartzConfig
+--------------------------------------
+In IntelliJ: Ctrl+Shift+N → search "SCEFSpringQuartzConfig"
+or Ctrl+Shift+F → search "SchedulerFactoryBean"
+
+The file is in: com.citi.risk.scef.limitexposure.config.schedule
+
+STEP 2 — Register GAIFeedScheduler
+-------------------------------------
+Look for how existing job triggers/details are registered.
+Two common patterns in SCEF:
+
+PATTERN A — SchedulerFactoryBean with triggers list:
+  If SCEFSpringQuartzConfig has:
+    schedulerFactoryBean.setTriggers(new Trigger[]{ trigger1, trigger2, ... })
+
+  Add all 6 GAI triggers to that array:
+    gaiFeedStressExposureTrigger(),
+    gaiFeedSwwrFlagTrigger(),
+    gaiFeedPseExposureTrigger(),
+    gaiFeedSwwrRecoveryTrigger(),
+    gaiFeedOetFlagTrigger(),
+    gaiFeedPseMonthEndTrigger()
+
+PATTERN B — @Import or component scan:
+  If SCEFSpringQuartzConfig uses @Import({...}):
+    Add @Import(GAIFeedScheduler.class) or include it in the list
+
+  If it uses @ComponentScan:
+    GAIFeedScheduler is already in the scef.limitexposure package tree
+    and will be picked up automatically
+
+STEP 3 — Cron override (optional)
+------------------------------------
+Default schedules in core.properties:
+  *.*.*.SCEF.gai.feed.cron.daily=0 0 3 * * ?     3:00 AM daily
+  *.*.*.SCEF.gai.feed.cron.monthly=0 0 4 L * ?   4:00 AM last day of month
+
+Override per environment if needed:
+  UAT.*.*.SCEF.gai.feed.cron.daily=0 0 6 * * ?   6:00 AM in UAT
+
+CRON REFERENCE:
+  0 0 3 * * ?      = 3:00 AM every day
+  0 0 4 L * ?      = 4:00 AM on last day of month
+  0 30 2 * * ?     = 2:30 AM every day
+  0 0 1 * * MON-FRI = 1:00 AM weekdays only
+
+STEP 4 — Verify in Batchly UI
+--------------------------------
+After restart, all 6 jobs should appear in Batchly under:
+  Monitoring → Batchly → Jobs tab
+
+  GAIFeedStressExposureJob
+  GAIFeedSwwrFlagJob
+  GAIFeedPseExposureJob
+  GAIFeedSwwrRecoveryJob
+  GAIFeedOetFlagJob
+  GAIFeedPseMonthEndJob
+
+They can also be triggered manually from Batchly at any time.
+================================================================
