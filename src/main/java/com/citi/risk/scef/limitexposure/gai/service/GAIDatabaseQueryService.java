@@ -6,8 +6,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
-import org.springframework.jdbc.datasource.LazyConnectionDataSourceProxy;
-import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.sql.DataSource;
 import java.io.ByteArrayOutputStream;
@@ -105,9 +103,9 @@ public class GAIDatabaseQueryService {
             // Same pattern as AutoOdsCefProcessUpgradeServiceImpl:
             //   dataSourceDictionary.getTransactionManager(name)
             //                       .getDataSource()
-            DataSource ds = dataSourceDictionary
-                    .getTransactionManager(ODS_DATASOURCE_NAME)
-                    .getDataSource();
+            // Confirmed from OdsTransactionFactory.java line 25:
+            //   dataSourceDictionary.getDataSource(dataSourceName)
+            DataSource ds = dataSourceDictionary.getDataSource(ODS_DATASOURCE_NAME);
 
             if (ds == null) {
                 throw new IllegalStateException(

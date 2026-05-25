@@ -53,7 +53,7 @@ public class GAIEmailAlertService {
         String subject = prefix() + " ZERO ROWS — " + feedName + " cobDate=" + cobDate;
         String body = buildBody("GAI Feed — Zero rows returned", feedName, cobDate,
                 "All three queries (EVENT, RECORD, ATTRIBUTE) returned 0 rows. " +
-                "No files were generated.<br><br>Possible causes:" +
+                "Empty files have been generated and transferred.<br><br>Possible causes:" +
                 "<ul>" +
                 "<li>No approved requests exist for this COB date</li>" +
                 "<li>cobDate parameter is incorrect</li>" +
@@ -70,7 +70,7 @@ public class GAIEmailAlertService {
         if (!alertEnabled()) return;
         String subject = prefix() + " ROW MISMATCH — " + feedName + " cobDate=" + cobDate;
         String body = buildBody("GAI Feed — Row count mismatch", feedName, cobDate,
-                "One or more file types returned 0 rows. No files were generated.<br><br>" +
+                "One or more file types returned 0 rows. Files have been generated with available data.<br><br>" +
                 "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse'>" +
                 "<tr style='background:#eee'><th>File Type</th><th>Row Count</th><th>Status</th></tr>" +
                 "<tr><td>EVENT</td><td>"     + eventCount     + "</td><td>" + rowStatus(eventCount)     + "</td></tr>" +
