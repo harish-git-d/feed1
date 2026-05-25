@@ -3,29 +3,30 @@ package com.citi.risk.scef.limitexposure.gai.service;
 import com.citi.risk.scef.limitexposure.domain.EmailDetails;
 import com.citi.risk.scef.limitexposure.domain.SCEFUserDto;
 import com.citi.risk.scef.limitexposure.service.CommonEmailSendService;
+import com.citi.risk.scef.limitexposure.service.EmailDetailService;
 import com.citi.risk.scef.limitexposure.service.EmailServiceProperties;
+import com.google.inject.Inject;
+import com.google.inject.name.Named;
 import org.apache.commons.configuration.Configuration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.inject.Inject;
-import com.google.inject.name.Named;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
  * Sends HTML email alerts for GAI feed issues.
  *
- * Uses SCEF's existing EmailDetails + SCEFUserDto pattern — confirmed from
- * EmailSendServiceImpl.sendHeartBeatNotificationEmail() which shows the
- * exact construction pattern (images 3-4).
+ * Uses EmailDetailService.setEmailDetailsSubject/BodyText +
+ * EmailDetailService.setEmailToList + sendEmail — the same pattern
+ * as EmailSendServiceImpl.scefDailySendEmail() (images 4-5).
  *
- * Three alert types:
- *   sendZeroRowsAlert()    — all 3 queries returned 0 rows
- *   sendRowMismatchAlert() — one file type has 0 rows while others do not
- *   sendFailureAlert()     — unhandled exception during job execution
+ * Subject and body are set directly via EmailDetailService helper methods,
+ * avoiding the FTL template requirement.
  */
 public class GAIEmailAlertService {
 
@@ -33,17 +34,20 @@ public class GAIEmailAlertService {
     private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final CommonEmailSendService emailSendService;
+    private final EmailDetailService     emailDetailService;
     private final EmailServiceProperties emailServiceProperties;
-    private final Configuration cfg;
+    private final Configuration          cfg;
 
     @Inject
     public GAIEmailAlertService(
-            @Named("emailSendServiceImpl") CommonEmailSendService emailSendService,
+            @Named("emailSendServiceImpl")     CommonEmailSendService emailSendService,
+            @Named("emailDetailServiceImpl")   EmailDetailService emailDetailService,
             EmailServiceProperties emailServiceProperties,
             Configuration cfg) {
-        this.emailSendService      = emailSendService;
+        this.emailSendService       = emailSendService;
+        this.emailDetailService     = emailDetailService;
         this.emailServiceProperties = emailServiceProperties;
-        this.cfg = cfg;
+        this.cfg                    = cfg;
     }
 
     // ── Alert 1: Zero rows ────────────────────────────────────────────────────
@@ -51,7 +55,7 @@ public class GAIEmailAlertService {
     public void sendZeroRowsAlert(String feedName, String cobDate) {
         if (!alertEnabled()) return;
         String subject = prefix() + " ZERO ROWS — " + feedName + " cobDate=" + cobDate;
-        String body = buildBody("GAI Feed — Zero rows returned", feedName, cobDate,
+        String body    = buildBody("GAI Feed — Zero rows returned", feedName, cobDate,
                 "All three queries (EVENT, RECORD, ATTRIBUTE) returned 0 rows. " +
                 "Empty files have been generated and transferred.<br><br>Possible causes:" +
                 "<ul>" +
@@ -69,7 +73,7 @@ public class GAIEmailAlertService {
                                       int eventCount, int recordCount, int attributeCount) {
         if (!alertEnabled()) return;
         String subject = prefix() + " ROW MISMATCH — " + feedName + " cobDate=" + cobDate;
-        String body = buildBody("GAI Feed — Row count mismatch", feedName, cobDate,
+        String body    = buildBody("GAI Feed — Row count mismatch", feedName, cobDate,
                 "One or more file types returned 0 rows. Files have been generated with available data.<br><br>" +
                 "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse'>" +
                 "<tr style='background:#eee'><th>File Type</th><th>Row Count</th><th>Status</th></tr>" +
@@ -86,7 +90,7 @@ public class GAIEmailAlertService {
     public void sendFailureAlert(String feedName, String cobDate, Exception e) {
         if (!alertEnabled()) return;
         String subject = prefix() + " FAILED — " + feedName + " cobDate=" + cobDate;
-        String body = buildBody("GAI Feed — Job failed", feedName, cobDate,
+        String body    = buildBody("GAI Feed — Job failed", feedName, cobDate,
                 "<b>Error:</b> "      + escapeHtml(e.getMessage()) + "<br>" +
                 "<b>Root cause:</b> " + escapeHtml(rootCause(e))   + "<br><br>" +
                 "Spring Batch will mark this step as FAILED.<br>" +
@@ -101,33 +105,34 @@ public class GAIEmailAlertService {
         try {
             String recipientsCsv = cfg.getString("SCEF.gai.feed.alert.recipients", "");
             if (recipientsCsv == null || recipientsCsv.trim().length() == 0) {
-                logger.warn("[GAI][EMAIL] SCEF.gai.feed.alert.recipients not set — alert suppressed: {}",
-                            subject);
+                logger.warn("[GAI][EMAIL] SCEF.gai.feed.alert.recipients not set — " +
+                            "alert suppressed: {}", subject);
                 return;
             }
 
-            // Build EmailDetails using the same pattern as
-            // EmailSendServiceImpl.sendHeartBeatNotificationEmail() (image 3-4)
-            EmailDetails emailDetails = new EmailDetails();
-
-            // From address — reuse SCEF's existing email from property
-            emailDetails.setFrom(emailServiceProperties.getEmailFrom());
-
-            // Recipients — Set<SCEFUserDto> matching SCEF's pattern
-            Set<SCEFUserDto> toSet = new HashSet<SCEFUserDto>();
+            // Build recipient list — same pattern as sendHeartBeatNotificationEmail
+            // (EmailSendServiceImpl lines 106-110): split by ";" into SCEFUserDto set
+            List<String> toList = new ArrayList<String>();
             for (String email : recipientsCsv.split(";")) {
                 String trimmed = email.trim();
-                if (trimmed.length() > 0) {
-                    SCEFUserDto dto = new SCEFUserDto();
-                    dto.setEmail(trimmed);
-                    toSet.add(dto);
-                }
+                if (trimmed.length() > 0) toList.add(trimmed);
             }
-            emailDetails.setTo(toSet);
 
-            // Subject and body
-            emailDetails.setEmailSubject(subject);
-            emailDetails.setEmailBody(htmlBody);
+            String fromAddress = emailServiceProperties.getEmailFrom();
+            if (fromAddress == null || fromAddress.trim().length() == 0) {
+                logger.warn("[GAI][EMAIL] emailServiceProperties.getEmailFrom() is null — " +
+                            "alert cannot be sent. Configure email.from. Subject was: {}", subject);
+                return;
+            }
+
+            // Build EmailDetails using EmailDetailService — same pattern as
+            // scefDailySendEmail (EmailSendServiceImpl lines 77-81)
+            EmailDetails emailDetails = new EmailDetails();
+
+            emailDetailService.setEmailFromList(emailDetails, fromAddress);
+            emailDetailService.setEmailToList(emailDetails, toList);
+            emailDetailService.setEmailDetailsSubject(emailDetails, subject);
+            emailDetailService.setEmailDetailsBodyText(emailDetails, htmlBody);
 
             emailSendService.sendEmail(emailDetails);
             logger.info("[GAI][EMAIL] Alert sent: {}", subject);
@@ -165,8 +170,6 @@ public class GAIEmailAlertService {
     private String prefix() {
         String base = cfg.getString("SCEF.gai.feed.alert.subject.prefix", "[SCEF-GAI]");
         try {
-            // Uses CoreModule.getEnvironment() — same as elsewhere in SCEF
-            // Produces subject like: [SCEF-GAI][UAT] FAILED — stress-exposure cobDate=20260522
             String env = com.citi.risk.scef.limitexposure.config.module.CoreModule
                     .getEnvironment().getLifeCycle().name();
             return base + "[" + env + "]";

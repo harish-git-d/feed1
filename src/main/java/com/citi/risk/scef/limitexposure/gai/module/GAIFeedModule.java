@@ -14,9 +14,12 @@ import com.google.inject.AbstractModule;
  * Add to SCEFModule.configure() after ScefMatrixDBModule (line 113):
  *   install(new GAIFeedModule());
  *
- * No DataSource binding needed — GAIDatabaseQueryService initialises
- * its JdbcTemplate lazily on first use via CRFGuiceContext, the same
- * pattern used by AgedReportJob and other SCEF jobs.
+ * Dependencies already bound by SCEFModule (no extra bindings needed):
+ *   @Named("emailSendServiceImpl")   CommonEmailSendService
+ *   @Named("emailDetailServiceImpl") EmailDetailService
+ *   EmailServiceProperties
+ *   Configuration
+ *   DataSourceDictionary
  */
 public class GAIFeedModule extends AbstractModule {
 
