@@ -109,11 +109,19 @@ public class GAISftpTransferService {
     }
 
     private String extractScript(String localDir) throws Exception {
-        // Extract to the gai output base dir (parent of feed-specific subdirs)
-        // e.g. /opt/scef/gai/staging/sftp.sh
-        String outputBase = Paths.get(localDir).getParent() != null
-                ? Paths.get(localDir).getParent().toString()
-                : localDir;
+        // Extract to SCEF.gai.feed.output.dir — the root staging directory
+        // e.g. SCEF.gai.feed.output.dir=/opt/scef/gai/staging → sftp.sh goes there
+        // localDir is outputDir/feedName/cobDate — too deep, use cfg directly
+        String outputBase = cfg.getString("SCEF.gai.feed.output.dir", "").trim();
+        if (outputBase.length() == 0) {
+            // Fallback: go up two levels from localDir (feedName/cobDate)
+            Path p = Paths.get(localDir);
+            outputBase = (p.getParent() != null && p.getParent().getParent() != null)
+                    ? p.getParent().getParent().toString()
+                    : localDir;
+            logger.warn("[GAI][SFTP] SCEF.gai.feed.output.dir not set — " +
+                        "extracting sftp.sh to fallback path: {}", outputBase);
+        }
         Files.createDirectories(Paths.get(outputBase));
 
         String destPath = outputBase + File.separator + "sftp.sh";
