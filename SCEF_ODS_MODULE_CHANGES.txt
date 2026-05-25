@@ -1,30 +1,15 @@
 =============================================================
-Changes required in ScefOdsDBModule.java
+ScefOdsDBModule.java — REVERT any changes made
 =============================================================
-File: scef/src/main/java/com/citi/risk/scef/limitexposure/
-      config/module/ods/ScefOdsDBModule.java
+If you added these lines to ScefOdsDBModule.getModule():
+  bind(DataSource.class).annotatedWith(Names.named("gai-ods"))...
+  expose(DataSource.class).annotatedWith(Names.named("gai-ods"));
 
-1. Add imports (if not already present):
-   import com.google.inject.name.Names;
-   import javax.sql.DataSource;
+REMOVE THEM. They are no longer needed.
 
-2. In getModule() lambda configure() method,
-   REPLACE the line you added:
-     expose(DataSource.class);                               ← REMOVE
+The GAI feed now uses DataSourceDictionary (same pattern as
+AutoOdsCefProcessUpgradeServiceImpl) — no changes to
+ScefOdsDBModule are required at all.
 
-   WITH these two lines:
-     bind(DataSource.class).annotatedWith(Names.named("gai-ods")).to(DataSource.class);
-     expose(DataSource.class).annotatedWith(Names.named("gai-ods"));
-
-WHY:
-   expose(DataSource.class) conflicts with 6 other DB modules
-   that all bind DataSource publicly via MyBatisModule.
-   Using @Named("gai-ods") creates a unique qualified binding
-   that has no conflict with any existing DataSource binding.
-
-RESULT — the end of configure() should look like:
-   expose(LastCobAdjustmentKeyActiveMapper.class);  // existing line 102
-   expose(AutoGAIReportMapper.class);               // existing line 103
-   bind(DataSource.class).annotatedWith(Names.named("gai-ods")).to(DataSource.class);
-   expose(DataSource.class).annotatedWith(Names.named("gai-ods"));
+ScefOdsDBModule should be exactly as it was before the GAI work.
 =============================================================
