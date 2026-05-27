@@ -5,6 +5,7 @@ import com.citi.risk.scef.limitexposure.gai.GAIFeedException;
 import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mock;
+import org.mockito.ArgumentCaptor;
 import org.mockito.MockitoAnnotations;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
@@ -124,14 +125,16 @@ public class GAIDatabaseQueryServiceTest {
 
         service.query("stress-exposure", "event", "20260522");
 
-        verify(jdbc).queryForList(anyString(), argThat(
-                (org.mockito.ArgumentMatcher<MapSqlParameterSource>) params -> {
-                    Map<String, Object> values = params.getValues();
-                    return "20260522".equals(values.get("cobDate"))
-                        && "20260522".equals(values.get("cobDateYYYYMMDD"))
-                        && "05222026".equals(values.get("cobDateMMDDYYYY"));
-                }
-        ));
+        // ArgumentCaptor avoids "Cannot resolve method getValues()" compile error
+        // that occurs when using argThat lambda with MapSqlParameterSource
+        ArgumentCaptor<MapSqlParameterSource> captor =
+                ArgumentCaptor.forClass(MapSqlParameterSource.class);
+        verify(jdbc).queryForList(anyString(), captor.capture());
+
+        Map<String, Object> values = captor.getValue().getValues();
+        assertEquals("20260522", values.get("cobDate"));
+        assertEquals("20260522", values.get("cobDateYYYYMMDD"));
+        assertEquals("05222026", values.get("cobDateMMDDYYYY"));
     }
 
     @Test
@@ -265,6 +268,10 @@ public class GAIDatabaseQueryServiceTest {
     }
 
     // ── toMmDdYyyy conversion ─────────────────────────────────────────────────
+    // Use ArgumentCaptor instead of argThat lambda to avoid the
+    // "Cannot resolve method getValues()" type inference compile error.
+    // MapSqlParameterSource.getValues() returns Map<String,Object> but
+    // javac cannot infer the generic type through the argThat lambda cast.
 
     @Test
     public void query_cobDateConvertedCorrectly_20260522becomes05222026() {
@@ -273,10 +280,14 @@ public class GAIDatabaseQueryServiceTest {
 
         service.query("stress-exposure", "event", "20260522");
 
-        verify(jdbc).queryForList(anyString(), argThat(
-                (org.mockito.ArgumentMatcher<MapSqlParameterSource>) params ->
-                        "05222026".equals(params.getValues().get("cobDateMMDDYYYY"))
-        ));
+        ArgumentCaptor<MapSqlParameterSource> captor =
+                ArgumentCaptor.forClass(MapSqlParameterSource.class);
+        verify(jdbc).queryForList(anyString(), captor.capture());
+
+        Map<String, Object> values = captor.getValue().getValues();
+        assertEquals("05222026", values.get("cobDateMMDDYYYY"));
+        assertEquals("20260522", values.get("cobDate"));
+        assertEquals("20260522", values.get("cobDateYYYYMMDD"));
     }
 
     @Test
@@ -286,9 +297,10 @@ public class GAIDatabaseQueryServiceTest {
 
         service.query("stress-exposure", "event", "20260101");
 
-        verify(jdbc).queryForList(anyString(), argThat(
-                (org.mockito.ArgumentMatcher<MapSqlParameterSource>) params ->
-                        "01012026".equals(params.getValues().get("cobDateMMDDYYYY"))
-        ));
+        ArgumentCaptor<MapSqlParameterSource> captor =
+                ArgumentCaptor.forClass(MapSqlParameterSource.class);
+        verify(jdbc).queryForList(anyString(), captor.capture());
+
+        assertEquals("01012026", captor.getValue().getValues().get("cobDateMMDDYYYY"));
     }
 }
