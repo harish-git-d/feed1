@@ -1,7 +1,6 @@
 package com.citi.risk.scef.limitexposure.gai.service;
 
 import com.citi.risk.scef.limitexposure.domain.EmailDetails;
-import com.citi.risk.scef.limitexposure.domain.SCEFUserDto;
 import com.citi.risk.scef.limitexposure.service.CommonEmailSendService;
 import com.citi.risk.scef.limitexposure.service.EmailDetailService;
 import com.citi.risk.scef.limitexposure.service.EmailServiceProperties;
@@ -14,24 +13,33 @@ import org.slf4j.LoggerFactory;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Sends HTML email alerts for GAI feed issues.
  *
  * Uses EmailDetailService.setEmailDetailsSubject/BodyText +
  * EmailDetailService.setEmailToList + sendEmail — the same pattern
- * as EmailSendServiceImpl.scefDailySendEmail() (images 4-5).
+ * as EmailSendServiceImpl.scefDailySendEmail().
  *
  * Subject and body are set directly via EmailDetailService helper methods,
  * avoiding the FTL template requirement.
+ *
+ * SonarQube fixes applied (v37):
+ *   S1192 — duplicate string literals extracted to constants
  */
 public class GAIEmailAlertService {
 
     private static final Logger logger = LoggerFactory.getLogger(GAIEmailAlertService.class);
     private static final DateTimeFormatter DT_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    // S1192: duplicate string literals extracted to constants
+    private static final String COB_DATE_LABEL    = " cobDate=";
+    private static final String SEVERITY_WARNING  = "WARNING";
+    private static final String SEVERITY_CRITICAL = "CRITICAL";
+    private static final String COLOUR_CRITICAL   = "#cc0000";
+    private static final String COLOUR_WARNING    = "#e65c00";
+    private static final String COLOUR_DEFAULT    = "#333333";
 
     private final CommonEmailSendService emailSendService;
     private final EmailDetailService     emailDetailService;
@@ -54,8 +62,8 @@ public class GAIEmailAlertService {
 
     public void sendZeroRowsAlert(String feedName, String cobDate) {
         if (!alertEnabled()) return;
-        String subject = prefix() + " ZERO ROWS — " + feedName + " cobDate=" + cobDate;
-        String body    = buildBody("GAI Feed — Zero rows returned", feedName, cobDate,
+        String subject = prefix() + " ZERO ROWS - " + feedName + COB_DATE_LABEL + cobDate;
+        String body    = buildBody("GAI Feed - Zero rows returned", feedName, cobDate,
                 "All three queries (EVENT, RECORD, ATTRIBUTE) returned 0 rows. " +
                 "Empty files have been generated and transferred.<br><br>Possible causes:" +
                 "<ul>" +
@@ -63,7 +71,7 @@ public class GAIEmailAlertService {
                 "<li>cobDate parameter is incorrect</li>" +
                 "<li>REQUEST_TYPE filter in SQL does not match live data</li>" +
                 "</ul>",
-                "WARNING");
+                SEVERITY_WARNING);
         send(subject, body, feedName);
     }
 
@@ -72,8 +80,8 @@ public class GAIEmailAlertService {
     public void sendRowMismatchAlert(String feedName, String cobDate,
                                       int eventCount, int recordCount, int attributeCount) {
         if (!alertEnabled()) return;
-        String subject = prefix() + " ROW MISMATCH — " + feedName + " cobDate=" + cobDate;
-        String body    = buildBody("GAI Feed — Row count mismatch", feedName, cobDate,
+        String subject = prefix() + " ROW MISMATCH - " + feedName + COB_DATE_LABEL + cobDate;
+        String body    = buildBody("GAI Feed - Row count mismatch", feedName, cobDate,
                 "One or more file types returned 0 rows. Files have been generated with available data.<br><br>" +
                 "<table border='1' cellpadding='4' cellspacing='0' style='border-collapse:collapse'>" +
                 "<tr style='background:#eee'><th>File Type</th><th>Row Count</th><th>Status</th></tr>" +
@@ -81,7 +89,7 @@ public class GAIEmailAlertService {
                 "<tr><td>RECORD</td><td>"    + recordCount    + "</td><td>" + rowStatus(recordCount)    + "</td></tr>" +
                 "<tr><td>ATTRIBUTE</td><td>" + attributeCount + "</td><td>" + rowStatus(attributeCount) + "</td></tr>" +
                 "</table>",
-                "WARNING");
+                SEVERITY_WARNING);
         send(subject, body, feedName);
     }
 
@@ -89,13 +97,13 @@ public class GAIEmailAlertService {
 
     public void sendFailureAlert(String feedName, String cobDate, Exception e) {
         if (!alertEnabled()) return;
-        String subject = prefix() + " FAILED — " + feedName + " cobDate=" + cobDate;
-        String body    = buildBody("GAI Feed — Job failed", feedName, cobDate,
+        String subject = prefix() + " FAILED - " + feedName + COB_DATE_LABEL + cobDate;
+        String body    = buildBody("GAI Feed - Job failed", feedName, cobDate,
                 "<b>Error:</b> "      + escapeHtml(e.getMessage()) + "<br>" +
                 "<b>Root cause:</b> " + escapeHtml(rootCause(e))   + "<br><br>" +
                 "Spring Batch will mark this step as FAILED.<br>" +
                 "Check Splunk or the Jetty log for the full stack trace.",
-                "CRITICAL");
+                SEVERITY_CRITICAL);
         send(subject, body, feedName);
     }
 
@@ -104,31 +112,26 @@ public class GAIEmailAlertService {
     private void send(String subject, String htmlBody, String feedName) {
         try {
             String recipientsCsv = cfg.getString("SCEF.gai.feed.alert.recipients", "");
-            if (recipientsCsv == null || recipientsCsv.trim().length() == 0) {
-                logger.warn("[GAI][EMAIL] SCEF.gai.feed.alert.recipients not set — " +
+            if (recipientsCsv == null || recipientsCsv.trim().isEmpty()) {
+                logger.warn("[GAI][EMAIL] SCEF.gai.feed.alert.recipients not set - " +
                             "alert suppressed: {}", subject);
                 return;
             }
 
-            // Build recipient list — same pattern as sendHeartBeatNotificationEmail
-            // (EmailSendServiceImpl lines 106-110): split by ";" into SCEFUserDto set
-            List<String> toList = new ArrayList<String>();
+            List<String> toList = new ArrayList<>();
             for (String email : recipientsCsv.split(";")) {
                 String trimmed = email.trim();
-                if (trimmed.length() > 0) toList.add(trimmed);
+                if (!trimmed.isEmpty()) toList.add(trimmed);
             }
 
             String fromAddress = emailServiceProperties.getEmailFrom();
-            if (fromAddress == null || fromAddress.trim().length() == 0) {
-                logger.warn("[GAI][EMAIL] emailServiceProperties.getEmailFrom() is null — " +
+            if (fromAddress == null || fromAddress.trim().isEmpty()) {
+                logger.warn("[GAI][EMAIL] emailServiceProperties.getEmailFrom() is null - " +
                             "alert cannot be sent. Configure email.from. Subject was: {}", subject);
                 return;
             }
 
-            // Build EmailDetails using EmailDetailService — same pattern as
-            // scefDailySendEmail (EmailSendServiceImpl lines 77-81)
             EmailDetails emailDetails = new EmailDetails();
-
             emailDetailService.setEmailFromList(emailDetails, fromAddress);
             emailDetailService.setEmailToList(emailDetails, toList);
             emailDetailService.setEmailDetailsSubject(emailDetails, subject);
@@ -146,9 +149,9 @@ public class GAIEmailAlertService {
     private String buildBody(String heading, String feedName,
                               String cobDate, String detail, String severity) {
         String now    = LocalDateTime.now().format(DT_FMT);
-        String colour = "CRITICAL".equals(severity) ? "#cc0000"
-                      : "WARNING".equals(severity)  ? "#e65c00"
-                      : "#333333";
+        String colour = SEVERITY_CRITICAL.equals(severity) ? COLOUR_CRITICAL
+                      : SEVERITY_WARNING.equals(severity)  ? COLOUR_WARNING
+                      : COLOUR_DEFAULT;
         return "<html><body style='font-family:Arial,sans-serif;font-size:14px'>" +
                "<h2 style='color:" + colour + ";margin-bottom:8px'>" + heading + "</h2>" +
                "<table cellpadding='6' style='border-collapse:collapse'>" +

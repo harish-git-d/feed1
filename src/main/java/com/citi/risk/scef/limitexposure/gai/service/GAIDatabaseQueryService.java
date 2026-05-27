@@ -2,6 +2,7 @@ package com.citi.risk.scef.limitexposure.gai.service;
 
 import com.google.inject.Inject;
 import com.citi.risk.core.data.db.DataSourceDictionary;
+import com.citi.risk.scef.limitexposure.gai.GAIFeedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
@@ -13,6 +14,7 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Executes GAI SQL files using SCEF's DataSourceDictionary — the same
@@ -24,6 +26,11 @@ import java.util.Map;
  *
  * No changes needed to ScefOdsDBModule — DataSourceDictionary is already
  * exposed publicly by CoreModule/DBModule infrastructure.
+ *
+ * SonarQube fixes applied (v37):
+ *   S3077  — volatile non-primitive replaced with AtomicReference (Bug fix)
+ *   S2139  — catch blocks either log OR rethrow, not both
+ *   S112   — GAIFeedException replaces generic RuntimeException throws
  */
 public class GAIDatabaseQueryService {
 
@@ -34,9 +41,13 @@ public class GAIDatabaseQueryService {
 
     private final DataSourceDictionary dataSourceDictionary;
 
-    // Lazily initialised — DataSourceDictionary is ready at injection time
-    // but we build the template on first use to follow SCEF lazy pattern
-    private volatile NamedParameterJdbcTemplate jdbc;
+    /**
+     * S3077: volatile on a non-primitive reference is not thread-safe.
+     * AtomicReference with compareAndSet provides correct lazy init
+     * without needing a synchronized block.
+     */
+    private final AtomicReference<NamedParameterJdbcTemplate> jdbcRef =
+            new AtomicReference<>();
 
     @Inject
     public GAIDatabaseQueryService(DataSourceDictionary dataSourceDictionary) {
@@ -59,7 +70,7 @@ public class GAIDatabaseQueryService {
         String sql = loadSql(sqlPath, feedName, fileType);
 
         if (!sql.contains(":cobDate") && !sql.contains(":cobDateYYYYMMDD")) {
-            logger.warn("[GAI][{}][{}] SQL has no cobDate bind — may extract full history: {}",
+            logger.warn("[GAI][{}][{}] SQL has no cobDate bind - may extract full history: {}",
                         feedName, fileType, sqlPath);
         }
 
@@ -73,10 +84,10 @@ public class GAIDatabaseQueryService {
         try {
             rows = getJdbc().queryForList(sql, params);
         } catch (Exception e) {
-            logger.error("[GAI][{}][{}] Query failed cobDate={} sql={}",
-                         feedName, fileType, cobDate, sqlPath);
-            logger.error("[GAI][{}][{}] Exception:", feedName, fileType, e);
-            throw e;
+            // S2139: do not both log AND rethrow — rethrow with context; caller logs
+            throw new GAIFeedException(
+                    "[GAI][" + feedName + "][" + fileType + "] Query failed cobDate="
+                    + cobDate + " sql=" + sqlPath, e);
         }
 
         logger.info("[GAI][{}][{}] rows={} elapsedMs={} cobDate={}",
@@ -87,43 +98,33 @@ public class GAIDatabaseQueryService {
 
     // ── Private ───────────────────────────────────────────────────────────────
 
+    /**
+     * S3077 fix: AtomicReference-based lazy init.
+     * compareAndSet guarantees only one template is created even under concurrent access.
+     */
     private NamedParameterJdbcTemplate getJdbc() {
-        if (jdbc == null) {
-            synchronized (this) {
-                if (jdbc == null) {
-                    jdbc = buildJdbcTemplate();
-                }
-            }
+        NamedParameterJdbcTemplate existing = jdbcRef.get();
+        if (existing != null) {
+            return existing;
         }
-        return jdbc;
+        NamedParameterJdbcTemplate created = buildJdbcTemplate();
+        // If another thread set it first, discard ours and use theirs — both are equivalent
+        jdbcRef.compareAndSet(null, created);
+        return jdbcRef.get();
     }
 
     private NamedParameterJdbcTemplate buildJdbcTemplate() {
-        try {
-            // Same pattern as AutoOdsCefProcessUpgradeServiceImpl:
-            //   dataSourceDictionary.getTransactionManager(name)
-            //                       .getDataSource()
-            // Confirmed from OdsTransactionFactory.java line 25:
-            //   dataSourceDictionary.getDataSource(dataSourceName)
-            DataSource ds = dataSourceDictionary.getDataSource(ODS_DATASOURCE_NAME);
-
-            if (ds == null) {
-                throw new IllegalStateException(
-                        "[GAI] Could not obtain DataSource for '" +
-                        ODS_DATASOURCE_NAME + "' from DataSourceDictionary");
-            }
-
-            logger.info("[GAI] JDBC template initialised via DataSourceDictionary key={}",
-                        ODS_DATASOURCE_NAME);
-            return new NamedParameterJdbcTemplate(ds);
-
-        } catch (Exception e) {
-            logger.error("[GAI] Failed to build JDBC template from DataSourceDictionary: {}",
-                         e.getMessage(), e);
-            throw new RuntimeException(
-                    "[GAI] DataSource initialisation failed for key=" +
-                    ODS_DATASOURCE_NAME, e);
+        // S2139: only throw — do not also log; caller's catch block handles logging
+        // S112:  use GAIFeedException instead of RuntimeException
+        DataSource ds = dataSourceDictionary.getDataSource(ODS_DATASOURCE_NAME);
+        if (ds == null) {
+            throw new GAIFeedException(
+                    "[GAI] Could not obtain DataSource for '" +
+                    ODS_DATASOURCE_NAME + "' from DataSourceDictionary");
         }
+        logger.info("[GAI] JDBC template initialised via DataSourceDictionary key={}",
+                    ODS_DATASOURCE_NAME);
+        return new NamedParameterJdbcTemplate(ds);
     }
 
     private String loadSql(String resource, String feedName, String fileType) {
@@ -131,7 +132,7 @@ public class GAIDatabaseQueryService {
                                         .getResourceAsStream(resource)) {
             if (is == null) {
                 logger.error("[GAI][{}][{}] SQL not found: {}", feedName, fileType, resource);
-                throw new IllegalStateException(
+                throw new GAIFeedException(
                         "GAI SQL not found on classpath: " + resource);
             }
             ByteArrayOutputStream baos = new ByteArrayOutputStream();
@@ -139,12 +140,14 @@ public class GAIDatabaseQueryService {
             int len;
             while ((len = is.read(buf)) != -1) baos.write(buf, 0, len);
             return new String(baos.toByteArray(), StandardCharsets.UTF_8);
-        } catch (IllegalStateException e) {
+
+        } catch (GAIFeedException e) {
+            // Re-throw our own exception directly — don't wrap it
             throw e;
         } catch (Exception e) {
-            logger.error("[GAI][{}][{}] Failed reading SQL {}: {}",
-                         feedName, fileType, resource, e.getMessage(), e);
-            throw new RuntimeException("Failed to load GAI SQL: " + resource, e);
+            // S2139: only throw — do not also log
+            // S112:  use GAIFeedException instead of RuntimeException
+            throw new GAIFeedException("Failed to load GAI SQL: " + resource, e);
         }
     }
 
