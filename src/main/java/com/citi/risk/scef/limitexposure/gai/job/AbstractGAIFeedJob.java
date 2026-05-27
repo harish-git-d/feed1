@@ -56,19 +56,21 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
         try {
             Configuration cfg = CRFGuiceContext.getInjector().getInstance(Configuration.class);
 
-            // ── Master switch ─────────────────────────────────────────────────
-            if (!cfg.getBoolean("SCEF.gai.feed.job.open", false)) {
-                logger.info("[GAI][{}] skipped — SCEF.gai.feed.job.open=false", feedName);
-                return 1;
-            }
-
             // ── cobDate format guard ──────────────────────────────────────────
             if (!cobDate.matches("\\d{8}")) {
                 throw new IllegalArgumentException(
                         "cobDate must be yyyyMMdd format. Received: '" + cobDate + "'");
             }
 
-            String  outputDir   = cfg.getString("SCEF.gai.feed.output.dir", "/opt/scef/gai/staging");
+            // Output directory — must be explicitly configured, no hardcoded fallback
+            String outputDir = cfg.getString("SCEF.gai.feed.output.dir", "");
+            if (outputDir == null || outputDir.trim().length() == 0) {
+                throw new IllegalStateException(
+                        "[GAI] SCEF.gai.feed.output.dir is not configured. " +
+                        "Add it to core.properties for the current environment.");
+            }
+            outputDir = outputDir.trim();
+
             boolean sftpEnabled = cfg.getBoolean("SCEF.gai.feed.sftp.enabled", false);
 
             logger.info("[GAI][{}] ===== JOB START cobDate={} sftp={} outputDir={} =====",
@@ -112,8 +114,8 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
 
         // ── Step 1: Load feed definition ──────────────────────────────────────
         logger.info("[GAI][{}] Step 1 — loading feed definition", feedName);
-        FeedDefinition def     = defLoader.load(feedName);
-        String         fileDir = outputDir + "/" + feedName + "/" + cobDate;
+        FeedDefinition def    = defLoader.load(feedName);
+        String         fileDir = resolveOutputDir(outputDir, feedName, cobDate);
 
         // ── Step 2: Query DB ──────────────────────────────────────────────────
         logger.info("[GAI][{}] Step 2 — querying ADMCEF.SCEF_REQUEST cobDate={}", feedName, cobDate);
@@ -124,23 +126,20 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
         int ec = eventRows.size(), rc = recordRows.size(), ac = attributeRows.size();
         logger.info("[GAI][{}] Query complete — event={} record={} attribute={}", feedName, ec, rc, ac);
 
-        // ── Validation: zero rows ─────────────────────────────────────────────
+        // ── Alert: zero rows — warn but still generate empty files ─────────────
         if (ec == 0 && rc == 0 && ac == 0) {
-            logger.warn("[GAI][{}] Zero rows for all file types cobDate={} — no files generated",
-                        feedName, cobDate);
+            logger.warn("[GAI][{}] Zero rows for all file types cobDate={} — " +
+                        "generating empty files and sending alert", feedName, cobDate);
             alertService.sendZeroRowsAlert(feedName, cobDate);
-            throw new IllegalStateException(
-                    "[GAI][" + feedName + "] Zero rows for cobDate=" + cobDate);
+            // Continue — empty files will be generated and transferred
         }
 
-        // ── Validation: row count mismatch ────────────────────────────────────
-        if (ec == 0 || rc == 0 || ac == 0) {
-            logger.warn("[GAI][{}] Row mismatch cobDate={} event={} record={} attribute={} — no files generated",
-                        feedName, cobDate, ec, rc, ac);
+        // ── Alert: row count mismatch — warn but still generate files ─────────
+        else if (ec == 0 || rc == 0 || ac == 0) {
+            logger.warn("[GAI][{}] Row mismatch cobDate={} event={} record={} attribute={} — " +
+                        "generating files and sending alert", feedName, cobDate, ec, rc, ac);
             alertService.sendRowMismatchAlert(feedName, cobDate, ec, rc, ac);
-            throw new IllegalStateException(String.format(
-                    "[GAI][%s] Row mismatch cobDate=%s event=%d record=%d attribute=%d",
-                    feedName, cobDate, ec, rc, ac));
+            // Continue — partial files will be generated and transferred
         }
 
         // ── Step 3: Write data files ──────────────────────────────────────────
@@ -154,11 +153,14 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
         fileWriter.writeControlFile(feedName, cobDate, fileDir, def, namingService,
                 Arrays.asList(eventFile, recordFile, attrFile));
 
-        // ── Step 5: SFTP transfer ─────────────────────────────────────────────
+        // ── Step 5: SFTP transfer — always from the latest folder ───────────────
         if (sftpEnabled) {
+            // Resolve the latest populated folder for this feedName/cobDate
+            // e.g. if 20260522/, 20260522-1/, 20260522-2/ exist → uses 20260522-2/
+            String sftpDir = resolveLatestDir(outputDir, feedName, cobDate);
             logger.info("[GAI][{}] Step 5 — SFTP transfer from {} to {}",
-                        feedName, fileDir, cfg.getString("SCEF.gai.feed.sftp.host"));
-            sftp.transfer(fileDir,
+                        feedName, sftpDir, cfg.getString("SCEF.gai.feed.sftp.host"));
+            sftp.transfer(sftpDir,
                     cfg.getString("SCEF.gai.feed.sftp.remote.path"),
                     cfg.getString("SCEF.gai.feed.sftp.host"),
                     cfg.getString("SCEF.gai.feed.sftp.user"),
@@ -167,8 +169,156 @@ public abstract class AbstractGAIFeedJob extends JobInterfaceDefaultImpl
             logger.info("[GAI][{}] Step 5 — SFTP disabled. Files staged at: {}", feedName, fileDir);
         }
 
+        // ── Step 6: Clean up files older than 30 days ───────────────────────────
+        logger.info("[GAI][{}] Step 6 — cleaning up files older than 30 days in {}",
+                    feedName, outputDir + "/" + feedName);
+        cleanupOldFiles(outputDir + "/" + feedName, cfg);
+
         logger.info("[GAI][{}] ===== JOB COMPLETE cobDate={} event={} record={} attribute={} =====",
                     feedName, cobDate, ec, rc, ac);
+    }
+
+    // ── Output directory resolution ─────────────────────────────────────────────
+
+    /**
+     * Resolves a unique output directory for this run.
+     *
+     * First run:   outputDir/feedName/cobDate/
+     * Second run:  outputDir/feedName/cobDate-1/
+     * Third run:   outputDir/feedName/cobDate-2/
+     * etc.
+     *
+     * A directory is considered "used" if it already exists and contains files.
+     * An empty directory is reused (allows retry after partial failure).
+     */
+    private String resolveOutputDir(String outputDir, String feedName, String cobDate) {
+        // Base path: first run
+        String base = outputDir + "/" + feedName + "/" + cobDate;
+        java.io.File baseDir = new java.io.File(base);
+
+        // Reuse if does not exist or is empty (clean retry scenario)
+        if (!baseDir.exists() || isEmptyDir(baseDir)) {
+            logger.info("[GAI][{}] Output directory: {}", feedName, base);
+            return base;
+        }
+
+        // Directory exists and has files — find next available suffix
+        for (int i = 1; i <= 999; i++) {
+            String candidate = base + "-" + i;
+            java.io.File candidateDir = new java.io.File(candidate);
+            if (!candidateDir.exists() || isEmptyDir(candidateDir)) {
+                logger.info("[GAI][{}] Re-run detected — output directory: {}", feedName, candidate);
+                return candidate;
+            }
+        }
+
+        // Fallback — should never happen in practice
+        String fallback = base + "-" + System.currentTimeMillis();
+        logger.warn("[GAI][{}] Could not find available suffix after 999 attempts — using: {}",
+                    feedName, fallback);
+        return fallback;
+    }
+
+    /**
+     * Returns the latest existing folder for feedName/cobDate.
+     * Checks base folder then -1, -2, -3 ... and returns the highest that exists.
+     *
+     * Examples:
+     *   Only 20260522/        exists → returns 20260522/
+     *   20260522/ and 20260522-1/ exist → returns 20260522-1/
+     *   20260522/ through 20260522-3/ exist → returns 20260522-3/
+     */
+    private String resolveLatestDir(String outputDir, String feedName, String cobDate) {
+        String base    = outputDir + "/" + feedName + "/" + cobDate;
+        String latest  = base;
+
+        // Walk forward until a folder doesn't exist
+        for (int i = 1; i <= 999; i++) {
+            String candidate = base + "-" + i;
+            if (new java.io.File(candidate).exists()) {
+                latest = candidate;
+            } else {
+                break;
+            }
+        }
+
+        logger.debug("[GAI][{}] Latest output folder for cobDate={}: {}", feedName, cobDate, latest);
+        return latest;
+    }
+
+    private boolean isEmptyDir(java.io.File dir) {
+        if (!dir.isDirectory()) return true;
+        String[] contents = dir.list();
+        return contents == null || contents.length == 0;
+    }
+
+    // ── File cleanup ─────────────────────────────────────────────────────────
+
+    /**
+     * Deletes cobDate subfolders older than SCEF.gai.feed.cleanup.days (default 30).
+     * Folder structure: {outputDir}/{feedName}/{cobDate}/
+     * Only deletes folders whose name matches yyyyMMdd and is older than the threshold.
+     * Cleanup failure never fails the job — logged as warning only.
+     */
+    private void cleanupOldFiles(String feedBaseDir, Configuration cfg) {
+        int retentionDays = cfg.getInt("SCEF.gai.feed.cleanup.days", 30);
+        java.io.File baseDir = new java.io.File(feedBaseDir);
+
+        if (!baseDir.exists() || !baseDir.isDirectory()) {
+            logger.debug("[GAI] Cleanup skipped — base dir does not exist: {}", feedBaseDir);
+            return;
+        }
+
+        java.time.LocalDate cutoff = java.time.LocalDate.now().minusDays(retentionDays);
+        java.time.format.DateTimeFormatter fmt = java.time.format.DateTimeFormatter.ofPattern("yyyyMMdd");
+        int deleted = 0;
+        int failed  = 0;
+
+        java.io.File[] subDirs = baseDir.listFiles(java.io.File::isDirectory);
+        if (subDirs == null) return;
+
+        for (java.io.File dir : subDirs) {
+            try {
+                // Only process folders named yyyyMMdd
+                java.time.LocalDate folderDate = java.time.LocalDate.parse(dir.getName(), fmt);
+                if (folderDate.isBefore(cutoff)) {
+                    if (deleteDirectory(dir)) {
+                        logger.info("[GAI] Deleted old folder: {} (age > {} days)",
+                                    dir.getAbsolutePath(), retentionDays);
+                        deleted++;
+                    } else {
+                        logger.warn("[GAI] Could not delete folder: {}", dir.getAbsolutePath());
+                        failed++;
+                    }
+                }
+            } catch (java.time.format.DateTimeParseException ignored) {
+                // Folder name is not a cobDate — skip silently
+            } catch (Exception e) {
+                // Cleanup failure must never fail the job
+                logger.warn("[GAI] Cleanup error for folder {}: {}", dir.getName(), e.getMessage());
+                failed++;
+            }
+        }
+
+        logger.info("[GAI] Cleanup complete — deleted={} failed={} cutoff={} retentionDays={}",
+                    deleted, failed, cutoff, retentionDays);
+    }
+
+    /** Recursively deletes a directory and all its contents. */
+    private boolean deleteDirectory(java.io.File dir) {
+        java.io.File[] files = dir.listFiles();
+        if (files != null) {
+            for (java.io.File f : files) {
+                if (f.isDirectory()) {
+                    deleteDirectory(f);
+                } else {
+                    if (!f.delete()) {
+                        logger.warn("[GAI] Could not delete file: {}", f.getAbsolutePath());
+                    }
+                }
+            }
+        }
+        return dir.delete();
     }
 
     // ── cobDate resolution ────────────────────────────────────────────────────
