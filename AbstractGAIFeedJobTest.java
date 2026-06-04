@@ -55,7 +55,6 @@ public class AbstractGAIFeedJobTest {
     @Mock private FeedDefinition feedDef;
 
     private static final String FEED_NAME   = "stress-exposure";
-    private static final String TODAY       = LocalDate.now().format(DateTimeFormatter.ofPattern("yyyyMMdd"));
     private static final String YESTERDAY   = LocalDate.now().minusDays(1).format(DateTimeFormatter.ofPattern("yyyyMMdd"));
     private static final String OUTPUT_DIR  = "/opt/scef/gai/staging";
     private static final String ENV         = "PROD";
@@ -121,7 +120,7 @@ public class AbstractGAIFeedJobTest {
         job.execute();
 
         // Verify DB queried with T-1 date
-        verify(dbService).query(eq(FEED_NAME), eq("event"), eq(YESTERDAY));
+        verify(dbService).query(FEED_NAME, "event", YESTERDAY);
     }
 
     @Test
@@ -133,9 +132,9 @@ public class AbstractGAIFeedJobTest {
         TestGAIFeedJob job = new TestGAIFeedJob(FEED_NAME);
         job.execute();
 
-        verify(dbService).query(eq(FEED_NAME), eq("event"), eq(overrideDate));
-        verify(dbService).query(eq(FEED_NAME), eq("record"), eq(overrideDate));
-        verify(dbService).query(eq(FEED_NAME), eq("attribute"), eq(overrideDate));
+        verify(dbService).query(FEED_NAME, "event", overrideDate);
+        verify(dbService).query(FEED_NAME, "record", overrideDate);
+        verify(dbService).query(FEED_NAME, "attribute", overrideDate);
     }
 
     @Test
@@ -147,7 +146,7 @@ public class AbstractGAIFeedJobTest {
         TestGAIFeedJob job = new TestGAIFeedJob(FEED_NAME);
         job.execute();
 
-        verify(dbService).query(eq(FEED_NAME), eq("event"), eq(YESTERDAY));
+        verify(dbService).query(FEED_NAME, "event", YESTERDAY);
     }
 
     // ── 3. cobDate format guard ────────────────────────────────────────────────
@@ -224,9 +223,9 @@ public class AbstractGAIFeedJobTest {
 
         // Job should not throw — zero rows is warn + continue
         assertEquals(Integer.valueOf(1), result);
-        verify(alertService).sendZeroRowsAlert(eq(FEED_NAME), eq(YESTERDAY));
+        verify(alertService).sendZeroRowsAlert(FEED_NAME, YESTERDAY);
         // Files still written
-        verify(fileWriter).write(eq(FEED_NAME), eq("EVENT"), anyString(), anyList(), any(), anyString(), any());
+        verify(fileWriter).write(FEED_NAME, "EVENT", anyString(), anyList(), any(), anyString(), any());
     }
 
     // ── 6. Row mismatch alert ──────────────────────────────────────────────────
@@ -242,7 +241,7 @@ public class AbstractGAIFeedJobTest {
         TestGAIFeedJob job = new TestGAIFeedJob(FEED_NAME);
         job.execute();
 
-        verify(alertService).sendRowMismatchAlert(eq(FEED_NAME), eq(YESTERDAY), eq(0), eq(5), eq(5));
+        verify(alertService).sendRowMismatchAlert(FEED_NAME, YESTERDAY, 0, 5, 5);
         verify(alertService, never()).sendZeroRowsAlert(anyString(), anyString());
     }
 
@@ -266,12 +265,12 @@ public class AbstractGAIFeedJobTest {
         verify(dbService).query(FEED_NAME, "attribute", YESTERDAY);
 
         // Step 3 — data files written
-        verify(fileWriter).write(eq(FEED_NAME), eq("EVENT"),     anyString(), anyList(), any(), anyString(), any());
-        verify(fileWriter).write(eq(FEED_NAME), eq("RECORD"),    anyString(), anyList(), any(), anyString(), any());
-        verify(fileWriter).write(eq(FEED_NAME), eq("ATTRIBUTE"), anyString(), anyList(), any(), anyString(), any());
+        verify(fileWriter).write(FEED_NAME, "EVENT",     anyString(), anyList(), any(), anyString(), any());
+        verify(fileWriter).write(FEED_NAME, "RECORD",    anyString(), anyList(), any(), anyString(), any());
+        verify(fileWriter).write(FEED_NAME, "ATTRIBUTE", anyString(), anyList(), any(), anyString(), any());
 
         // Step 4 — control file written
-        verify(fileWriter).writeControlFile(eq(FEED_NAME), anyString(), anyString(), any(), any(), anyList());
+        verify(fileWriter).writeControlFile(FEED_NAME, anyString(), anyString(), any(), any(), anyList());
 
         // Step 5 — SFTP transfer executed
         verify(sftp).transfer(anyString(), anyString(), anyString(), anyString());
@@ -289,7 +288,7 @@ public class AbstractGAIFeedJobTest {
 
         verify(sftp, never()).transfer(anyString(), anyString(), anyString(), anyString());
         // Files still written locally
-        verify(fileWriter).write(eq(FEED_NAME), eq("EVENT"), anyString(), anyList(), any(), anyString(), any());
+        verify(fileWriter).write(FEED_NAME, "EVENT", anyString(), anyList(), any(), anyString(), any());
     }
 
     @Test
@@ -302,9 +301,9 @@ public class AbstractGAIFeedJobTest {
 
         verify(sftp).transfer(
             anyString(),                                         // localDir
-            eq("/gfolysftp/gfolyrsk/incoming/citirisk"),        // remotePath
-            eq("gfolygwprod.wlb3.nam.nsroot.net"),              // host
-            eq("opiempr")                                       // user
+            "/gfolysftp/gfolyrsk/incoming/citirisk",        // remotePath
+            "gfolygwprod.wlb3.nam.nsroot.net",              // host
+            "opiempr"                                       // user
         );
     }
 
@@ -325,7 +324,7 @@ public class AbstractGAIFeedJobTest {
             assertTrue(e.getMessage().contains(FEED_NAME));
         }
 
-        verify(alertService).sendFailureAlert(eq(FEED_NAME), anyString(), any(Exception.class));
+        verify(alertService).sendFailureAlert(FEED_NAME, anyString(), any(Exception.class));
     }
 
     @Test
@@ -404,11 +403,11 @@ public class AbstractGAIFeedJobTest {
     }
 
     private void stubFileWriter() throws Exception {
-        when(fileWriter.write(anyString(), eq("EVENT"),     anyString(), anyList(), any(), anyString(), any()))
+        when(fileWriter.write(anyString(), "EVENT",     anyString(), anyList(), any(), anyString(), any()))
             .thenReturn(new FileMetadata("event.dat.gz",     "/tmp/event.dat.gz",     3, "EVENT"));
-        when(fileWriter.write(anyString(), eq("RECORD"),    anyString(), anyList(), any(), anyString(), any()))
+        when(fileWriter.write(anyString(), "RECORD",    anyString(), anyList(), any(), anyString(), any()))
             .thenReturn(new FileMetadata("record.dat.gz",    "/tmp/record.dat.gz",    3, "RECORD"));
-        when(fileWriter.write(anyString(), eq("ATTRIBUTE"), anyString(), anyList(), any(), anyString(), any()))
+        when(fileWriter.write(anyString(), "ATTRIBUTE", anyString(), anyList(), any(), anyString(), any()))
             .thenReturn(new FileMetadata("attribute.dat.gz", "/tmp/attribute.dat.gz", 3, "ATTRIBUTE"));
         when(fileWriter.writeControlFile(anyString(), anyString(), anyString(), any(), any(), anyList()))
             .thenReturn("161534_CRC_SCEF-STRESSEXP_N_CONTROL_DLY_F_SRC_20260601_20260601203000.ctrl");
